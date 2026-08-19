@@ -46,6 +46,9 @@ pub const imm32 = zw.imm32;
 pub const dwrite = zw.dwrite;
 pub const d2d1 = zw.d2d1;
 
+// —— zigwin32 便捷层（COLORREF 等通用类型）——
+pub const zig = zw.zig;
+
 // —— 命名空间（结构体/枚举/常量）——
 pub const foundation = zw.foundation;
 pub const windows_and_messaging = zw.ui.windows_and_messaging;

@@ -100,6 +100,13 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
 
     // 2. 注册窗口类。
     const hinst = w32.kernel32.GetModuleHandleW(null) orelse return error.GetModuleHandleFailed;
+    // 类背景画刷 = 主题 bg_window：窗口创建/显示瞬间即为暗色，杜绝启动白屏闪烁
+    const bg_brush = w32.gdi32.CreateSolidBrush(w32.zig.COLORREF.rgb(
+        toByte(opts.theme_ref.bg_window.r),
+        toByte(opts.theme_ref.bg_window.g),
+        toByte(opts.theme_ref.bg_window.b),
+    )) orelse return error.CreateBrushFailed;
+    defer _ = w32.gdi32.DeleteObject(bg_brush);
     const wnd_class = w32.windows_and_messaging.WNDCLASSEXW{
         .cbSize = @sizeOf(w32.windows_and_messaging.WNDCLASSEXW),
         // CS_DBLCLKS：接收 WM_LBUTTONDBLCLK（双击选词，§5.8）——缺失则双击退化为两次 DOWN。
@@ -112,7 +119,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         // 客户区默认箭头光标：鼠标从非客户区（边框）移入时，系统据 hCursor 恢复箭头，
         // 避免残留边框拉伸光标（问题 2）。
         .hCursor = w32.user32.LoadCursorW(null, w32.windows_and_messaging.IDC_ARROW),
-        .hbrBackground = null,
+        .hbrBackground = bg_brush,
         .lpszMenuName = null,
         .lpszClassName = class_name,
         .hIconSm = null,
@@ -161,10 +168,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         std.heap.page_allocator.destroy(bridge);
     }
 
-    // 6. 显示并进入消息泵。
-    _ = w32.user32.ShowWindow(hwnd, w32.windows_and_messaging.SW_SHOW);
-    defer _ = w32.user32.DestroyWindow(hwnd);
-
+    // 6. 挂载 ctx（让 WM_PAINT 等消息能找到窗口状态）。
     var ctx = WindowCtx{
         .hwnd = hwnd,
         .tree = tree,
@@ -179,8 +183,14 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .ime = .{ .hwnd = hwnd },
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
+    defer _ = w32.user32.DestroyWindow(hwnd);
 
-    // 首帧：触发一次 WM_PAINT（window 初始尺寸）。
+    // 7. 先渲染首帧再显示：否则窗口先以默认白色客户区呈现一瞬（启动白屏闪烁）。
+    //    显示后 WM_PAINT 会再正常重绘一帧，内容一致。
+    renderFrame(&ctx);
+    _ = w32.user32.ShowWindow(hwnd, w32.windows_and_messaging.SW_SHOW);
+
+    // 消息泵。
     var msg: w32.windows_and_messaging.MSG = undefined;
     while (ctx.running) {
         const got = w32.user32.GetMessageW(&msg, null, 0, 0);
@@ -316,6 +326,11 @@ fn toD2DColor(c: theme.Color) w32.direct2d.common.D2D_COLOR_F {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
+/// 主题 f32 颜色分量 → GDI 8bit（类背景画刷用；物理像素边界转换，L3）。
+fn toByte(c: f32) u8 {
+    return @intFromFloat(@min(255.0, c * 255.0 + 0.5));
+}
+
 /// 窗口过程：M0 只负责退出与请求重绘。
 fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM) callconv(.winapi) w32.LRESULT {
     const ctx: ?*WindowCtx = @ptrFromInt(@as(usize, @bitCast(w32.user32.GetWindowLongPtrW(hwnd, .P_USERDATA))));
@@ -355,6 +370,12 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
             }
             return 0;
+        },
+        w32.windows_and_messaging.WM_ERASEBKGND => {
+            // 启动瞬间（ctx==null）：走 DefWindowProc，用类画刷（主题 bg_window）填充，
+            // 窗口一显示即暗色，杜绝白屏；此后背景由 D2D 每帧 Clear 负责，
+            // 拦截系统擦除防运行期闪烁。
+            if (ctx != null) return 1;
         },
         w32.windows_and_messaging.WM_PAINT => {
             // 首帧：ctx 尚未挂载（CreateWindow 在 SetWindowLongPtr 之前不发 WM_PAINT）。
