@@ -12,6 +12,7 @@ const geo = @import("../core/geometry.zig");
 const node = @import("../core/node.zig");
 const painter = @import("../core/painter.zig");
 const text = @import("text.zig");
+const button = @import("button.zig");
 
 /// 供 Tree 引用的分发表实例。
 pub const table: node.DispatchTable = .{
@@ -25,7 +26,7 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
         .none => unreachable, // 不应发生：none 走布局容器
         .box => unreachable, // 同上
         .text => |d| text.measure(tree, d, c),
-        .button => |d| text.measure(tree, .{ .text = d.label }, c), // M3 深化按钮态
+        .button => |d| button.measure(tree, d, c),
         .edit => .{}, // M5 交付
         .scroll => .{}, // M6 交付
         .custom => unreachable, // custom 走自身 vtable，不经此路由
@@ -37,7 +38,7 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
     switch (n.widget) {
         .none, .box => {},
         .text => |d| text.paint(tree, pc, n.rect, d),
-        .button => |d| text.paint(tree, pc, n.rect, .{ .text = d.label }),
+        .button => |d| button.paint(tree, pc, n, d),
         .edit, .scroll => {},
         .custom => {},
     }

@@ -29,6 +29,8 @@ pub const core = struct {
 pub const widgets = struct {
     pub const dispatch = @import("widgets/dispatch.zig");
     pub const text = @import("widgets/text.zig");
+    pub const button = @import("widgets/button.zig");
+    pub const builder = @import("widgets/builder.zig");
 };
 
 /// 渲染层（M2）：D2D/DWrite 实现。
@@ -42,7 +44,13 @@ pub const render = struct {
 /// 平台层：窗口/消息泵。M0 仅开放最小窗口能力。
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
+    pub const input = @import("platform/input.zig");
+    pub const post = @import("platform/post.zig");
 };
+
+/// Ui 句柄：跨线程任务桥（§5.12）。`Ui.post` 是唯一可从任意线程调用的 API（L7 例外）。
+/// 从 window.run 获取；post 保证 FIFO + happens-before + 消息泵线程执行。
+pub const Ui = platform.post.PostBridge;
 
 // 计划中的公共出口（M1 起逐步开放）：
 //   pub const Tree   = core.node.Tree;
@@ -64,7 +72,10 @@ test "collect all core module tests" {
     _ = @import("core/painter.zig");
     _ = @import("widgets/dispatch.zig");
     _ = @import("widgets/text.zig");
+    _ = @import("widgets/button.zig");
     _ = @import("render/cache.zig");
     _ = @import("render/text.zig");
+    _ = @import("platform/input.zig");
+    _ = @import("platform/post.zig");
     _ = @import("platform/window.zig");
 }

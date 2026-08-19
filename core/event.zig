@@ -26,6 +26,27 @@ pub const Key = struct {
     mods: u32 = 0,
 };
 
+/// 虚拟键码（Win32 VK_* 子集，M3 所需）。值对齐 Win32。
+pub const VK = struct {
+    pub const TAB: u32 = 0x09;
+    pub const RETURN: u32 = 0x0D;
+    pub const SHIFT: u32 = 0x10;
+    pub const CONTROL: u32 = 0x11;
+    pub const MENU: u32 = 0x12;
+    pub const LEFT: u32 = 0x25;
+    pub const UP: u32 = 0x26;
+    pub const RIGHT: u32 = 0x27;
+    pub const DOWN: u32 = 0x28;
+    pub const SPACE: u32 = 0x20;
+};
+
+/// 修饰键位（mods 字段）。
+pub const Mod = struct {
+    pub const shift: u32 = 1 << 0;
+    pub const control: u32 = 1 << 1;
+    pub const alt: u32 = 1 << 2;
+};
+
 /// 文本输入载荷（M5 由 WM_CHAR / IME 产生的 UTF-8 串）。
 pub const TextInput = struct {
     text: []const u8 = "",

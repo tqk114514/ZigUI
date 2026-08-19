@@ -17,7 +17,7 @@ function Assert-Exit0([string]$label) {
 }
 
 Write-Host "=== 1/5 zig fmt --check ==="
-zig fmt --check build.zig ui.zig theme.zig platform core widgets render
+zig fmt --check build.zig ui.zig theme.zig platform core widgets render examples
 Assert-Exit0 "zig fmt --check"
 
 Write-Host "=== 2/5 zig build test ==="

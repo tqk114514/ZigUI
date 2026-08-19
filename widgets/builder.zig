@@ -1,0 +1,51 @@
+//! widgets/builder.zig —— 构建 DSL（规则 §5.8）。
+//!
+//! 模块不变量：
+//! - 树一次性声明式构建（column / button / text 等），构建后经 find(id) + setter 修改；
+//! - 列表变更走 replaceChildren 重建（§4.3/§5.3）；
+//! - 事件订阅：调用方在返回的节点上挂 handler + handler_ctx（§5.8 trampoline 模式）。
+//!
+//! 注意：id / label / text 字符串经 tree.allocStr 拷贝入 arena（§4.3），调用方可传栈上字符串。
+
+const std = @import("std");
+const node = @import("../core/node.zig");
+const widget = @import("../core/widget.zig");
+const layout = @import("../core/layout.zig");
+
+/// 创建 column 布局容器并挂到 parent。
+pub fn column(tree: *node.Tree, parent: *node.Node, opts: layout.Stack) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.layout = .{ .column = opts };
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 创建 row 布局容器并挂到 parent。
+pub fn row(tree: *node.Tree, parent: *node.Node, opts: layout.Stack) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.layout = .{ .row = opts };
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 创建文本节点。
+pub fn text(tree: *node.Tree, parent: *node.Node, str: []const u8) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.widget = .{ .text = .{ .text = try tree.allocStr(str) } };
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 创建按钮节点（label 拷贝入 arena）。click 由调用方挂 n.handler/n.handler_ctx。
+pub fn button(tree: *node.Tree, parent: *node.Node, label: []const u8) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.widget = .{ .button = .{ .label = try tree.allocStr(label) } };
+    n.flags.focusable = true; // 按钮默认可聚焦（Tab 焦点环）。
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 便捷：给节点设置 id（拷贝入 arena），供 find(id) 定位。
+pub fn setNodeId(tree: *node.Tree, n: *node.Node, id: []const u8) !void {
+    n.id = try tree.allocStr(id);
+}

@@ -20,6 +20,8 @@ const dispatch = @import("../widgets/dispatch.zig");
 const device_mod = @import("../render/device.zig");
 const painter_mod = @import("../render/painter.zig");
 const text_mod = @import("../render/text.zig");
+const post_mod = @import("post.zig");
+const input_mod = @import("input.zig");
 const theme = @import("../theme.zig");
 
 const log = std.log.scoped(.platform);
@@ -34,6 +36,9 @@ pub const Options = struct {
     height: i32 = 600,
     /// 主题引用（§5.12：theme 是共享常量）。
     theme_ref: *const theme.Theme = &theme.dark,
+    /// 可选：run 创建任务桥后回填指针，供调用方（如 worker 线程）调 Ui.post。
+    /// 指向一个 *PostBridge 槽（调用方先置 undefined/null）。
+    post_out: ?**post_mod.PostBridge = null,
 };
 
 /// 每窗口的上下文，经 GWLP_USERDATA 挂到 HWND，wndProc 取回。
@@ -44,6 +49,8 @@ const WindowCtx = struct {
     device: ?*device_mod.Device = null,
     painter: painter_mod.D2DPainter = undefined,
     theme_ref: *const theme.Theme,
+    /// 跨线程任务桥（§5.12）：Ui.post 的目标。
+    post_bridge: *post_mod.PostBridge = undefined,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zigui.m0");
@@ -113,6 +120,16 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     defer device.deinit();
     tree.text_system = text_mod.asTextSystem(&device.text_system);
 
+    // 5b. 创建跨线程任务桥（§5.12），绑定 hwnd。
+    const bridge = try std.heap.page_allocator.create(post_mod.PostBridge);
+    bridge.* = post_mod.PostBridge.init(std.heap.page_allocator);
+    bridge.hwnd = hwnd;
+    if (opts.post_out) |out| out.* = bridge;
+    defer {
+        bridge.deinit();
+        std.heap.page_allocator.destroy(bridge);
+    }
+
     // 6. 显示并进入消息泵。
     _ = w32.user32.ShowWindow(hwnd, w32.windows_and_messaging.SW_SHOW);
     defer _ = w32.user32.DestroyWindow(hwnd);
@@ -123,6 +140,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .device = device,
         .painter = .{ .device = device },
         .theme_ref = opts.theme_ref,
+        .post_bridge = bridge,
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
 
@@ -205,6 +223,54 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 return 0;
             }
         },
+        w32.windows_and_messaging.WM_APP + 1 => {
+            // dipui 任务（§5.9 消息归属表）：跨线程 post 的唤醒。
+            if (ctx != null) {
+                ctx.?.post_bridge.drainTasks();
+                // 任务（如快照 applier）可能更新树：请求重绘。
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            }
+            return 0;
+        },
+        // —— WM_MOUSE 系列：input.zig 转成 Event（窗口 DIP 坐标）→ tree.dispatch ——
+        w32.windows_and_messaging.WM_MOUSEMOVE,
+        w32.windows_and_messaging.WM_LBUTTONDOWN,
+        w32.windows_and_messaging.WM_LBUTTONUP,
+        w32.windows_and_messaging.WM_RBUTTONDOWN,
+        w32.windows_and_messaging.WM_RBUTTONUP,
+        w32.windows_and_messaging.WM_MBUTTONDOWN,
+        w32.windows_and_messaging.WM_MBUTTONUP,
+        w32.windows_and_messaging.WM_LBUTTONDBLCLK,
+        w32.windows_and_messaging.WM_RBUTTONDBLCLK,
+        w32.windows_and_messaging.WM_MBUTTONDBLCLK,
+        => {
+            if (ctx != null) {
+                const scale = ctx.?.device.?.dpi_scale;
+                if (input_mod.pointerEvent(u_msg, l_param, scale)) |ev| {
+                    var e = ev;
+                    _ = ctx.?.tree.dispatch(&e);
+                    // 事件可能改树状态（hover/active/文本等）：请求重绘（保留模式）。
+                    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                }
+            }
+            return 0;
+        },
+        // —— WM_KEYDOWN/UP：input.zig；Tab 走焦点链，其余给 focus 节点 ——
+        w32.windows_and_messaging.WM_KEYDOWN,
+        w32.windows_and_messaging.WM_KEYUP,
+        w32.windows_and_messaging.WM_SYSKEYDOWN,
+        w32.windows_and_messaging.WM_SYSKEYUP,
+        => {
+            if (ctx != null) {
+                if (input_mod.keyEvent(u_msg, w_param)) |ev| {
+                    var e = ev;
+                    _ = ctx.?.tree.dispatch(&e);
+                    // 焦点变化等：请求重绘（保留模式）。
+                    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                }
+            }
+            return 0;
+        },
         w32.windows_and_messaging.WM_SIZE => {
             if (ctx != null and w_param != w32.windows_and_messaging.SIZE_MINIMIZED) {
                 // lParam：低 16 位 = 宽度，高 16 位 = 高度（不是 32 位取整）。
@@ -267,6 +333,15 @@ test "window/win32 symbols exist" {
     _ = w32.windows_and_messaging.WM_PAINT;
     _ = w32.windows_and_messaging.WM_SIZE;
     _ = w32.windows_and_messaging.WM_DPICHANGED;
+    _ = w32.windows_and_messaging.WM_APP;
+    _ = w32.windows_and_messaging.WM_MOUSEMOVE;
+    _ = w32.windows_and_messaging.WM_LBUTTONDOWN;
+    _ = w32.windows_and_messaging.WM_LBUTTONUP;
+    _ = w32.windows_and_messaging.WM_KEYDOWN;
+    _ = w32.windows_and_messaging.WM_KEYUP;
+    _ = w32.windows_and_messaging.WM_SYSKEYDOWN;
+    _ = w32.windows_and_messaging.WM_SYSKEYUP;
+    _ = w32.user32.GetKeyState;
     _ = w32.windows_and_messaging.SIZE_MINIMIZED;
     _ = w32.windows_and_messaging.WS_OVERLAPPEDWINDOW;
     _ = w32.windows_and_messaging.SW_SHOW;

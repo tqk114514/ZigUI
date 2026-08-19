@@ -297,13 +297,54 @@ pub const Tree = struct {
     // —— 事件分发 ——
 
     /// 指针事件先 hit test 再沿 parent 冒泡；键盘事件走焦点链（§5.3）。
+    /// 同时维护 hover / active 单值指针（供 Button 等状态机推导，§5.3）。
     pub fn dispatch(t: *Tree, e: *const event.Event) bool {
         switch (e.*) {
-            .pointer_down, .pointer_up, .pointer_move => |p| {
-                const hit = hitTest(t.root, p.pos) orelse return false;
+            .pointer_move => |p| {
+                const hit = hitTest(t.root, p.pos);
+                // hover 变化：旧节点与新节点都重绘。
+                if (t.hover != hit) {
+                    if (t.hover) |old| old.invalidatePaint();
+                    t.hover = hit;
+                    if (hit) |n| n.invalidatePaint();
+                }
+                return if (hit) |n| bubble(t, n, e) else false;
+            },
+            .pointer_down => |p| {
+                const hit = hitTest(t.root, p.pos) orelse {
+                    // 点空白：清 active（M3：不抢焦点，焦点变化留待后续策略）。
+                    t.active = null;
+                    return false;
+                };
+                t.active = hit;
+                hit.invalidatePaint();
                 return bubble(t, hit, e);
             },
-            .key_down, .key_up => {
+            .pointer_up => |p| {
+                const hit = hitTest(t.root, p.pos);
+                if (t.active) |a| {
+                    t.active = null;
+                    a.invalidatePaint();
+                    // click 语义（§5.8）：仅"按下与抬起同一节点"时才沿该节点冒泡，
+                    // 触发其 handler；否则视为拖动/误触，不派发。
+                    if (hit == a) return bubble(t, a, e);
+                }
+                return false;
+            },
+            .key_down => |k| {
+                // Tab / Shift+Tab：焦点环（声明顺序，§5.3）。
+                if (k.vk == event.VK.TAB) {
+                    const next = t.focusNext((k.mods & event.Mod.shift) != 0);
+                    if (next) |n| {
+                        t.setFocus(n);
+                        return true;
+                    }
+                    return false;
+                }
+                const f = t.focus orelse return false;
+                return bubble(t, f, e);
+            },
+            .key_up => {
                 const f = t.focus orelse return false;
                 return bubble(t, f, e);
             },
@@ -314,6 +355,77 @@ pub const Tree = struct {
                 return bubble(t, target, e);
             },
         }
+    }
+
+    /// 设置焦点：旧焦点发 focus_lost，新焦点发 focus_gained。
+    pub fn setFocus(t: *Tree, n: ?*Node) void {
+        if (t.focus == n) return;
+        if (t.focus) |old| {
+            _ = bubble(t, old, &.{ .focus_lost = {} });
+            old.invalidatePaint();
+        }
+        t.focus = n;
+        if (n) |new| {
+            _ = bubble(t, new, &.{ .focus_gained = {} });
+            new.invalidatePaint();
+        }
+    }
+
+    /// 按声明顺序（DFS 前序）查找 focusable 节点形成焦点环。
+    /// forward=true → 找当前焦点之后的第一个；false → 之前的。
+    /// 无当前焦点时：forward 从首个 focusable 开始，否则从末尾开始。
+    pub fn focusNext(t: *Tree, forward: bool) ?*Node {
+        const n = t.focus;
+        if (n == null) {
+            return if (forward) findFocusableFirst(t.root) else findFocusableLast(t.root);
+        }
+        // 收集前序序列。
+        var order: [256]*Node = undefined;
+        var count: usize = 0;
+        collectFocusable(t.root, &order, &count);
+        if (count == 0) return null;
+        var idx: isize = -1;
+        for (order[0..count], 0..) |node, i| {
+            if (node == n) {
+                idx = @intCast(i);
+                break;
+            }
+        }
+        if (idx < 0) {
+            // 当前焦点不在环中（非 focusable），从头开始。
+            return if (forward) order[0] else order[count - 1];
+        }
+        const delta: isize = if (forward) 1 else -1;
+        const next_idx = @mod(idx + delta, @as(isize, @intCast(count)));
+        return order[@intCast(next_idx)];
+    }
+
+    fn collectFocusable(n: *Node, out: []*Node, count: *usize) void {
+        if (count.* >= out.len) return;
+        if (n.flags.focusable and !n.flags.disabled and n.flags.visible) {
+            out[count.*] = n;
+            count.* += 1;
+        }
+        for (n.children) |c| collectFocusable(c, out, count);
+    }
+
+    fn findFocusableFirst(n: *Node) ?*Node {
+        if (n.flags.focusable and !n.flags.disabled and n.flags.visible) return n;
+        for (n.children) |c| {
+            if (findFocusableFirst(c)) |hit| return hit;
+        }
+        return null;
+    }
+
+    fn findFocusableLast(n: *Node) ?*Node {
+        // 后序反向：先找最后一个 focusable。
+        var i: usize = n.children.len;
+        while (i > 0) {
+            i -= 1;
+            if (findFocusableLast(n.children[i])) |hit| return hit;
+        }
+        if (n.flags.focusable and !n.flags.disabled and n.flags.visible) return n;
+        return null;
     }
 
     fn bubble(t: *Tree, start: *Node, e: *const event.Event) bool {
@@ -576,6 +688,40 @@ test "dispatch bubbles up and stops on true" {
     try std.testing.expect(!state.root_called); // 冒泡被 leaf 停止
 }
 
+test "click semantics: only same-node down+up triggers handler once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .{ .column = .{} };
+    const leaf = try addFixedLeaf(&t, t.root, .{ .width = 50, .height = 50 });
+    t.ensureLayout(.{ .width = 200, .height = 200 });
+
+    var clicks: u32 = 0;
+    leaf.handler_ctx = &clicks;
+    leaf.handler = &struct {
+        fn h(n: *Node, ctx: ?*anyopaque, e: *const event.Event) bool {
+            _ = n;
+            const c: *u32 = @ptrCast(@alignCast(ctx.?));
+            if (e.* == .pointer_up) c.* += 1;
+            return true;
+        }
+    }.h;
+
+    // 纯移动不触发 click。
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 25, .y = 25 } } });
+    try std.testing.expectEqual(@as(u32, 0), clicks);
+    // 同节点 按下 + 抬起 = 恰好 1 次 click。
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 25, .y = 25 } } });
+    _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 25, .y = 25 } } });
+    try std.testing.expectEqual(@as(u32, 1), clicks);
+    // 按下在节点内、抬起到空白：不算 click。
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 25, .y = 25 } } });
+    _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 150, .y = 150 } } });
+    try std.testing.expectEqual(@as(u32, 1), clicks);
+}
+
 test "find by id" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -609,4 +755,75 @@ test "invalidateMeasure walks ancestors" {
     try std.testing.expect(leaf.dirty_measure);
     try std.testing.expect(mid.dirty_measure);
     try std.testing.expect(t.root.dirty_measure);
+}
+
+test "tab focus ring cycles focusable in declaration order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .{ .column = .{} };
+    const a = try t.createNode(t.root);
+    a.flags.focusable = true;
+    const b = try t.createNode(t.root);
+    b.flags.focusable = true;
+    const c = try t.createNode(t.root); // 不可聚焦，应被跳过
+    const d = try t.createNode(t.root);
+    d.flags.focusable = true;
+    try t.replaceChildren(t.root, &.{ a, b, c, d });
+
+    // 无焦点：Tab → 首个；Shift-Tab → 末尾。
+    try std.testing.expect(t.focusNext(true).? == a);
+    try std.testing.expect(t.focusNext(false).? == d);
+
+    // 设焦点到 b：Tab → d（跳过 c）；Shift-Tab → a。
+    t.focus = b;
+    try std.testing.expect(t.focusNext(true).? == d);
+    try std.testing.expect(t.focusNext(false).? == a);
+
+    // 焦点到 d：Tab 回绕到 a。
+    t.focus = d;
+    try std.testing.expect(t.focusNext(true).? == a);
+}
+
+test "setFocus fires focus events" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    const a = try t.createNode(t.root);
+    a.flags.focusable = true;
+    const b = try t.createNode(t.root);
+    b.flags.focusable = true;
+    try t.replaceChildren(t.root, &.{ a, b });
+
+    var gained: usize = 0;
+    var lost: usize = 0;
+    const Ctx = struct {
+        gained: *usize,
+        lost: *usize,
+    };
+    var ctx = Ctx{ .gained = &gained, .lost = &lost };
+    for ([_]*Node{ a, b }) |n| {
+        n.handler_ctx = &ctx;
+        n.handler = &struct {
+            fn h(_: *Node, c: ?*anyopaque, e: *const event.Event) bool {
+                const s: *Ctx = @ptrCast(@alignCast(c.?));
+                switch (e.*) {
+                    .focus_gained => s.gained.* += 1,
+                    .focus_lost => s.lost.* += 1,
+                    else => {},
+                }
+                return false;
+            }
+        }.h;
+    }
+
+    t.setFocus(a);
+    t.setFocus(b); // a 失焦，b 获焦。
+    try std.testing.expect(gained == 2);
+    try std.testing.expect(lost == 1);
+    try std.testing.expect(t.focus == b);
 }
