@@ -39,6 +39,10 @@ pub const Options = struct {
     /// 可选：run 创建任务桥后回填指针，供调用方（如 worker 线程）调 Ui.post。
     /// 指向一个 *PostBridge 槽（调用方先置 undefined/null）。
     post_out: ?**post_mod.PostBridge = null,
+    /// 消息泵退出后、窗口与任务桥销毁前回调（UI 线程）。
+    /// 正确关闭顺序（§5.12）：在此通知后台线程退出并 join，之后销毁桥才安全。
+    on_close: ?*const fn (user_ctx: ?*anyopaque) void = null,
+    on_close_ctx: ?*anyopaque = null,
 };
 
 /// 每窗口的上下文，经 GWLP_USERDATA 挂到 HWND，wndProc 取回。
@@ -51,6 +55,9 @@ const WindowCtx = struct {
     theme_ref: *const theme.Theme,
     /// 跨线程任务桥（§5.12）：Ui.post 的目标。
     post_bridge: *post_mod.PostBridge = undefined,
+    /// 关闭钩子（§5.12 正确关闭顺序）：桥销毁前调用。
+    on_close: ?*const fn (user_ctx: ?*anyopaque) void = null,
+    on_close_ctx: ?*anyopaque = null,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zigui.m0");
@@ -141,6 +148,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .painter = .{ .device = device },
         .theme_ref = opts.theme_ref,
         .post_bridge = bridge,
+        .on_close = opts.on_close,
+        .on_close_ctx = opts.on_close_ctx,
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
 
@@ -156,6 +165,9 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         _ = w32.user32.TranslateMessage(&msg);
         _ = w32.user32.DispatchMessageW(&msg);
     }
+    // 正确关闭顺序（§5.12）：桥/窗口尚未销毁，先通知后台线程退出。
+    // 回调需在桥的 defer 销毁之前完成（join 后台线程），保证 post 不再发生。
+    if (ctx.on_close) |f| f(ctx.on_close_ctx);
     return .closed;
 }
 
