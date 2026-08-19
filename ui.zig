@@ -1,11 +1,11 @@
 //! zigui —— Windows 单平台、保留模式、全自绘的轻量现代 UI 工具包。
 //! 本文件是唯一公共 API 出口（规则 §3），其他文件的 pub 一律视为 internal。
 //!
-//! 模块不变量（M4 现状）：
+//! 模块不变量（M5 现状）：
 //! - 仅 re-export 公共 API，不在此实现逻辑；
 //! - core/ 不得 import 平台/渲染模块（L1），此处同样不触碰 win32。
 //!
-//! 现状：M4（文本深化）已交付。M5 将新增 Edit + IME。
+//! 现状：M5（Edit + IME + 剪贴板）已交付。M6 将新增 Scroll + 控件组 + undo。
 
 const std = @import("std");
 
@@ -30,6 +30,7 @@ pub const widgets = struct {
     pub const dispatch = @import("widgets/dispatch.zig");
     pub const text = @import("widgets/text.zig");
     pub const button = @import("widgets/button.zig");
+    pub const edit = @import("widgets/edit.zig");
     pub const builder = @import("widgets/builder.zig");
 };
 
@@ -73,6 +74,7 @@ test "collect all core module tests" {
     _ = @import("widgets/dispatch.zig");
     _ = @import("widgets/text.zig");
     _ = @import("widgets/button.zig");
+    _ = @import("widgets/edit.zig");
     _ = @import("render/cache.zig");
     _ = @import("render/text.zig");
     _ = @import("platform/input.zig");
