@@ -23,7 +23,7 @@ const pad_v: f32 = 6;
 pub fn measure(tree: *node.Tree, d: widget.Button, c: layout.Constraints) geo.Size {
     var base: geo.Size = .{};
     if (tree.text_system) |ts| {
-        if (ts.layout(d.label, &tree.theme_ref.font_ui, c.max.width)) |tl| {
+        if (ts.layout(d.label, &tree.theme_ref.font_ui, c.max.width, .{})) |tl| {
             base = tl.bounds;
         }
     }
@@ -58,7 +58,7 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Bu
 
     // 文本居中。
     if (tree.text_system) |ts| {
-        if (ts.layout(d.label, &th.font_ui, n.rect.w)) |tl| {
+        if (ts.layout(d.label, &th.font_ui, n.rect.w, .{})) |tl| {
             const text_rect = geo.Rect{
                 .x = n.rect.x + pad_h,
                 .y = n.rect.y + pad_v,

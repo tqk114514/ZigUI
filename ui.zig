@@ -1,11 +1,11 @@
 //! zigui —— Windows 单平台、保留模式、全自绘的轻量现代 UI 工具包。
 //! 本文件是唯一公共 API 出口（规则 §3），其他文件的 pub 一律视为 internal。
 //!
-//! 模块不变量（M0 阶段）：
+//! 模块不变量（M4 现状）：
 //! - 仅 re-export 公共 API，不在此实现逻辑；
 //! - core/ 不得 import 平台/渲染模块（L1），此处同样不触碰 win32。
 //!
-//! 现状：M0 骨架，尚未开放任何控件 API；窗口能力经 platform/ 提供。
+//! 现状：M4（文本深化）已交付。M5 将新增 Edit + IME。
 
 const std = @import("std");
 

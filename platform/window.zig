@@ -43,6 +43,9 @@ pub const Options = struct {
     /// 正确关闭顺序（§5.12）：在此通知后台线程退出并 join，之后销毁桥才安全。
     on_close: ?*const fn (user_ctx: ?*anyopaque) void = null,
     on_close_ctx: ?*anyopaque = null,
+    /// 每帧绘制完成后回调（UI 线程）。供 profiling / bench（§4.9）统计帧耗时。
+    frame_hook: ?*const fn (user_ctx: ?*anyopaque) void = null,
+    frame_hook_ctx: ?*anyopaque = null,
 };
 
 /// 每窗口的上下文，经 GWLP_USERDATA 挂到 HWND，wndProc 取回。
@@ -58,6 +61,9 @@ const WindowCtx = struct {
     /// 关闭钩子（§5.12 正确关闭顺序）：桥销毁前调用。
     on_close: ?*const fn (user_ctx: ?*anyopaque) void = null,
     on_close_ctx: ?*anyopaque = null,
+    /// 帧钩子（§4.9 bench）。
+    frame_hook: ?*const fn (user_ctx: ?*anyopaque) void = null,
+    frame_hook_ctx: ?*anyopaque = null,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zigui.m0");
@@ -150,6 +156,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .post_bridge = bridge,
         .on_close = opts.on_close,
         .on_close_ctx = opts.on_close_ctx,
+        .frame_hook = opts.frame_hook,
+        .frame_hook_ctx = opts.frame_hook_ctx,
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
 
@@ -204,6 +212,8 @@ fn renderFrame(ctx: *WindowCtx) void {
         ctx.tree.paint(pc);
         _ = dev.endFrame();
     }
+    // 帧钩子（§4.9）：本帧绘制完成，供 bench 统计帧耗时。
+    if (ctx.frame_hook) |f| f(ctx.frame_hook_ctx);
 }
 
 /// 客户端尺寸（DIP）：物理像素 / dpi_scale。

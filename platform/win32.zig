@@ -50,6 +50,7 @@ pub const d2d1 = zw.d2d1;
 pub const foundation = zw.foundation;
 pub const windows_and_messaging = zw.ui.windows_and_messaging;
 pub const hi_dpi = zw.ui.hi_dpi;
+pub const system_information = zw.system.system_information;
 
 // —— 渲染命名空间（M2 起启用，先留出口）——
 pub const direct2d = zw.graphics.direct2d;

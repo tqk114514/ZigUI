@@ -17,7 +17,7 @@ pub fn main() anyerror!void {
 
     // 计数显示。
     var count: u32 = 0;
-    const label_node = try ui.widgets.builder.text(&tree, tree.root, "Count: 0");
+    const label_node = try ui.widgets.builder.text(&tree, tree.root, "Count: 0", .{});
 
     // 按钮：点击计数 + 更新文本。
     const inc_btn = try ui.widgets.builder.button(&tree, tree.root, "Increment (+1)");

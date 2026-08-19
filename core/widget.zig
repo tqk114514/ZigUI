@@ -15,9 +15,13 @@ pub const Box = struct {
     // 纯布局容器，不绘制；无额外数据。
 };
 
-/// 文本控件数据（M2 深化；M1 仅占位字段）。
+/// 文本控件数据（M2 深化；M4 加 wrap/ellipsis）。
 pub const Text = struct {
     text: []const u8,
+    /// 超出可用宽度时换行（多行）。默认单行不换行。
+    wrap: bool = false,
+    /// 超宽时尾部省略号（单行）。与 wrap 互斥。
+    ellipsis: bool = false,
 };
 
 /// 按钮控件数据（M3；M1 仅占位）。

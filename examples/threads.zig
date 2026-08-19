@@ -35,7 +35,7 @@ pub fn main() anyerror!void {
     tree.root.layout = .{ .column = .{ .gap = theme.dark.spacing.sm } };
     tree.root.style = .{ .padding = .all(theme.dark.spacing.md) };
 
-    const label = try ui.widgets.builder.text(&tree, tree.root, "worker: idle");
+    const label = try ui.widgets.builder.text(&tree, tree.root, "worker: idle", .{});
     const btn = try ui.widgets.builder.button(&tree, tree.root, "Start worker");
 
     // 任务桥回填：worker 线程经它 post 回 UI 线程（run 内部赋值）。

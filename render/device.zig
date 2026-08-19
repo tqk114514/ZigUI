@@ -68,7 +68,7 @@ pub const Device = struct {
             .dwrite_factory = dwrite_factory,
             .hwnd = hwnd,
             .brush_cache = cache.BrushCache.init(allocator, d2d_factory),
-            .text_system = .{ .allocator = allocator, .factory = dwrite_factory },
+            .text_system = text.TextSystemImpl.init(allocator, dwrite_factory),
         };
         return self;
     }

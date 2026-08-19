@@ -16,19 +16,21 @@ const theme = @import("../theme.zig");
 /// 求文本固有尺寸：loosen 约束 → text_system.layout 取 bounds。
 pub fn measure(tree: *node.Tree, d: widget.Text, c: layout.Constraints) geo.Size {
     if (tree.text_system) |ts| {
-        if (ts.layout(d.text, &tree.theme_ref.font_ui, c.max.width)) |tl| {
+        const opts = painter.TextLayoutOptions{ .wrap = d.wrap, .ellipsis = d.ellipsis };
+        if (ts.layout(d.text, &tree.theme_ref.font_ui, c.max.width, opts)) |tl| {
             return .{ .width = tl.bounds.width, .height = tl.bounds.height };
         }
     }
     return .{};
 }
 
-/// 在 rect 内容区内绘制文本（顶对齐、左对齐；M2 静态文本）。
+/// 在 rect 内容区内绘制文本（顶对齐、左对齐）。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, rect: geo.Rect, d: widget.Text) void {
     if (d.text.len == 0) return;
     if (tree.text_system) |ts| {
-        // 用 rect 宽度换行约束；M2 不换行（text 控件多为单行）。
-        if (ts.layout(d.text, &tree.theme_ref.font_ui, rect.w)) |tl| {
+        // 用 rect 宽度换行约束；wrap/ellipsis 由控件数据决定（M4）。
+        const opts = painter.TextLayoutOptions{ .wrap = d.wrap, .ellipsis = d.ellipsis };
+        if (ts.layout(d.text, &tree.theme_ref.font_ui, rect.w, opts)) |tl| {
             pc.drawText(rect, tl, tree.theme_ref.text);
         }
     }
@@ -39,7 +41,7 @@ const std = @import("std");
 /// 测试用假 TextSystem：固定尺寸。
 const MockTs = struct {
     layout: painter.TextLayout,
-    fn layoutImpl(impl: *anyopaque, _: []const u8, _: *const theme.Font, _: f32) ?*painter.TextLayout {
+    fn layoutImpl(impl: *anyopaque, _: []const u8, _: *const theme.Font, _: f32, _: painter.TextLayoutOptions) ?*painter.TextLayout {
         const self: *MockTs = @ptrCast(@alignCast(impl));
         return &self.layout;
     }

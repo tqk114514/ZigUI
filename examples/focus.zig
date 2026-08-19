@@ -15,7 +15,7 @@ pub fn main() anyerror!void {
     tree.root.layout = .{ .column = .{ .gap = theme.dark.spacing.sm } };
     tree.root.style = .{ .padding = .all(theme.dark.spacing.md) };
 
-    _ = try ui.widgets.builder.text(&tree, tree.root, "Focus ring: press Tab / Shift+Tab to cycle");
+    _ = try ui.widgets.builder.text(&tree, tree.root, "Focus ring: press Tab / Shift+Tab to cycle", .{});
     // 三个可聚焦按钮，focusable 由 builder.button 默认设置。
     _ = try ui.widgets.builder.button(&tree, tree.root, "First  (A)");
     _ = try ui.widgets.builder.button(&tree, tree.root, "Second (B)");

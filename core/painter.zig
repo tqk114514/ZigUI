@@ -18,6 +18,14 @@ pub const TextLayout = struct {
     payload: *anyopaque = undefined,
 };
 
+/// 文本布局选项（M4：wrap / ellipsis）。
+pub const TextLayoutOptions = struct {
+    /// 超过 max_width 是否换行（多行文本）。
+    wrap: bool = false,
+    /// 超宽时尾部省略号（单行，与 wrap 互斥）。
+    ellipsis: bool = false,
+};
+
 /// TextSystem 接口（§5.7）：layout 必须命中缓存（L4 稳态零分配）。
 /// core 只定义接口；render/text.zig 提供 DWrite 实现，测试用 Mock 提供假尺寸。
 pub const TextSystem = struct {
@@ -26,11 +34,11 @@ pub const TextSystem = struct {
 
     pub const VTable = struct {
         /// 生成文本布局。max_width ≤ 0 表示不换行。返回 TextLayout 指针（实现侧持有，勿释放）。
-        layout: *const fn (impl: *anyopaque, text: []const u8, font: *const theme.Font, max_width: f32) ?*TextLayout,
+        layout: *const fn (impl: *anyopaque, text: []const u8, font: *const theme.Font, max_width: f32, options: TextLayoutOptions) ?*TextLayout,
     };
 
-    pub fn layout(self: TextSystem, text: []const u8, font: *const theme.Font, max_width: f32) ?*TextLayout {
-        return self.vtable.layout(self.impl, text, font, max_width);
+    pub fn layout(self: TextSystem, text: []const u8, font: *const theme.Font, max_width: f32, options: TextLayoutOptions) ?*TextLayout {
+        return self.vtable.layout(self.impl, text, font, max_width, options);
     }
 };
 

@@ -65,28 +65,8 @@ pub const Event = union(enum) {
     custom: u32,
 };
 
-/// 事件是否属于指针类（用于 dispatch 走 hit test 而非焦点链）。
-pub fn isPointer(e: Event) bool {
-    return switch (e) {
-        .pointer_down, .pointer_up, .pointer_move => true,
-        else => false,
-    };
-}
-
-/// 事件是否为键盘类（走焦点链）。
-pub fn isKey(e: Event) bool {
-    return switch (e) {
-        .key_down, .key_up => true,
-        else => false,
-    };
-}
-
-test "event classification" {
-    try std.testing.expect(isPointer(.{ .pointer_down = .{} }));
-    try std.testing.expect(!isPointer(.{ .key_down = .{} }));
-    try std.testing.expect(isKey(.{ .key_down = .{} }));
-    try std.testing.expect(!isKey(.{ .focus_gained = {} }));
-    // 默认 Pointer 坐标在原点。
+test "pointer default values" {
+    // 默认 Pointer 坐标在原点，按钮为 left。
     const p = Pointer{};
     try std.testing.expect(geo.approxEq(0, p.pos.x));
     try std.testing.expect(p.button == .left);

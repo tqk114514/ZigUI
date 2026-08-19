@@ -11,6 +11,7 @@ const std = @import("std");
 const node = @import("../core/node.zig");
 const widget = @import("../core/widget.zig");
 const layout = @import("../core/layout.zig");
+const painter = @import("../core/painter.zig");
 
 /// 创建 column 布局容器并挂到 parent。
 pub fn column(tree: *node.Tree, parent: *node.Node, opts: layout.Stack) !*node.Node {
@@ -28,10 +29,10 @@ pub fn row(tree: *node.Tree, parent: *node.Node, opts: layout.Stack) !*node.Node
     return n;
 }
 
-/// 创建文本节点。
-pub fn text(tree: *node.Tree, parent: *node.Node, str: []const u8) !*node.Node {
+/// 创建文本节点。`opts` 支持 wrap/ellipsis（M4）。
+pub fn text(tree: *node.Tree, parent: *node.Node, str: []const u8, opts: painter.TextLayoutOptions) !*node.Node {
     const n = try tree.createNode(parent);
-    n.widget = .{ .text = .{ .text = try tree.allocStr(str) } };
+    n.widget = .{ .text = .{ .text = try tree.allocStr(str), .wrap = opts.wrap, .ellipsis = opts.ellipsis } };
     try tree.appendChild(parent, n);
     return n;
 }
