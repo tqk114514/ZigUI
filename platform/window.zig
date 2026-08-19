@@ -102,7 +102,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     const hinst = w32.kernel32.GetModuleHandleW(null) orelse return error.GetModuleHandleFailed;
     const wnd_class = w32.windows_and_messaging.WNDCLASSEXW{
         .cbSize = @sizeOf(w32.windows_and_messaging.WNDCLASSEXW),
-        .style = .{},
+        // CS_DBLCLKS：接收 WM_LBUTTONDBLCLK（双击选词，§5.8）——缺失则双击退化为两次 DOWN。
+        .style = .{ .DBLCLKS = 1 },
         .lpfnWndProc = wndProc,
         .cbClsExtra = 0,
         .cbWndExtra = 0,
@@ -453,20 +454,16 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_IME_SETCONTEXT => {
             if (ctx != null) reportImeCaret(ctx.?);
             // 不清除 ISC 标志（清除组合窗标志会联动抑制微软拼音候选框）：
-            // 组合窗隐藏靠 WM_IME_STARTCOMPOSITION 返回 0（示例实测）。
-            const raw_isc: u32 = @as(u32, @truncate(@as(u64, @bitCast(l_param))));
-            log.debug("ime: SETCONTEXT isc=0x{x}", .{raw_isc});
+            // 组合窗隐藏靠 WM_IME_STARTCOMPOSITION 返回 0（§5.10 示例实测）。
             return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
         },
         w32.windows_and_messaging.WM_IME_STARTCOMPOSITION => {
             if (ctx != null) reportImeCaret(ctx.?);
             // 必须返回 0：示例实测——系统组合窗仅在 STARTCOMPOSITION 返回 0 时隐藏。
-            log.debug("ime: STARTCOMPOSITION (return 0)", .{});
             return 0;
         },
         w32.windows_and_messaging.WM_IME_ENDCOMPOSITION => {
             if (ctx != null) {
-                log.debug("ime: ENDCOMPOSITION", .{});
                 var ev = event.Event{ .ime_compose = .{ .text = "" } };
                 _ = ctx.?.tree.dispatch(&ev);
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);

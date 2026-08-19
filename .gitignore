@@ -6,3 +6,5 @@ zig-out/
 zig-pkg/
 
 .trae/
+
+checklists/

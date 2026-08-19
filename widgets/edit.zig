@@ -62,8 +62,8 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ed
     };
     if (content.w <= 0 or content.h <= 0) return;
 
-    // 选区背景（文本之下）。
-    if (d.hasSelection()) {
+    // 选区背景（文本之下）。仅焦点时绘制——失焦后不高亮（选区数据保留，聚焦恢复）。
+    if (focus and d.hasSelection()) {
         const a = @min(d.anchor, d.caret);
         const b = @max(d.anchor, d.caret);
         const ax = prefixWidth(ts, &th.font_ui, d.buf, a);
@@ -166,11 +166,13 @@ fn caretAtX(tree: *node.Tree, d: *widget.Edit, x: f32) u32 {
     return @intCast(best);
 }
 
-/// 双击选词：词字符 → 选中连续词段；空白 → 选中连续空白段（空格可单独选中）。
+/// 双击选词：空白 → 连续空白段；词字符（英文/数字）→ 连续词段；
+/// 其余单字符（中文/全角标点）→ 仅选中一个字符（§5.8）。
 fn selectWordAt(d: *widget.Edit, pos: u32) void {
     const buf = d.buf;
     if (buf.len == 0) return;
     const ws = if (pos < buf.len) isWhitespace(buf, pos) else false;
+    const word = if (pos < buf.len) isWordChar(buf, pos) else false;
     var a = pos;
     var b = pos;
     if (ws) {
@@ -183,7 +185,7 @@ fn selectWordAt(d: *widget.Edit, pos: u32) void {
             if (!isWhitespace(buf, b)) break;
             b = @intCast(utf8.nextCodepoint(buf, b));
         }
-    } else {
+    } else if (word) {
         while (a > 0) {
             const prev = utf8.prevCodepoint(buf, a);
             if (!isWordChar(buf, prev)) break;
@@ -193,24 +195,34 @@ fn selectWordAt(d: *widget.Edit, pos: u32) void {
             if (!isWordChar(buf, b)) break;
             b = @intCast(utf8.nextCodepoint(buf, b));
         }
+    } else if (b < buf.len) {
+        // 单字符（中文等）：仅选中自身。
+        b = @intCast(utf8.nextCodepoint(buf, b));
     }
     d.anchor = @intCast(a);
     d.caret = @intCast(b);
 }
 
+/// 解码 pos 处的一个完整码点（utf8Decode 只接受 1-4 字节的精确切片，不能传整个剩余串）。
+fn decodeAt(buf: []const u8, pos: usize) ?u21 {
+    if (pos >= buf.len) return null;
+    const seq_len = std.unicode.utf8ByteSequenceLength(buf[pos]) catch return null;
+    if (pos + seq_len > buf.len) return null;
+    return std.unicode.utf8Decode(buf[pos .. pos + seq_len]) catch null;
+}
+
 /// 是否空白（ASCII 空白 + 全角空格 U+3000）。
 fn isWhitespace(buf: []const u8, pos: usize) bool {
-    const cp = std.unicode.utf8Decode(buf[pos..]) catch return false;
+    const cp = decodeAt(buf, pos) orelse return false;
     if (cp < 128) return std.ascii.isWhitespace(@intCast(cp));
     return cp == 0x3000;
 }
 
-/// 是否词字符（非空白非标点：字母/数字/下划线/CJK/全角字母数字）。
+/// 是否可扩展词字符（字母/数字/下划线/全角字母数字；不含 CJK——中文按单字符）。
 fn isWordChar(buf: []const u8, pos: usize) bool {
-    const cp = std.unicode.utf8Decode(buf[pos..]) catch return false;
+    const cp = decodeAt(buf, pos) orelse return false;
     if (cp < 128) return std.ascii.isAlphanumeric(@intCast(cp)) or cp == '_';
-    return (cp >= 0x4E00 and cp <= 0x9FFF) or // CJK 统一表意
-        (cp >= 0xFF10 and cp <= 0xFF19) or // 全角数字
+    return (cp >= 0xFF10 and cp <= 0xFF19) or // 全角数字
         (cp >= 0xFF21 and cp <= 0xFF3A) or // 全角大写
         (cp >= 0xFF41 and cp <= 0xFF5A); // 全角小写
 }
@@ -224,8 +236,9 @@ fn handleKey(tree: *node.Tree, n: *node.Node, d: *widget.Edit, k: event.Key) boo
     switch (k.vk) {
         event.VK.LEFT => moveCaret(d, shift, -1),
         event.VK.RIGHT => moveCaret(d, shift, 1),
-        event.VK.HOME => moveCaretAbs(d, shift, 0),
-        event.VK.END => moveCaretAbs(d, shift, d.buf.len),
+        // 单行编辑框：上/下方向键等同 Home/End（标准行为）。
+        event.VK.HOME, event.VK.UP => moveCaretAbs(d, shift, 0),
+        event.VK.END, event.VK.DOWN => moveCaretAbs(d, shift, d.buf.len),
         event.VK.BACKSPACE => backspace(tree, d),
         event.VK.DELETE => deleteForward(tree, d),
         else => return false, // 字符输入走 WM_CHAR → text_input（L5），其余冒泡。
@@ -234,9 +247,10 @@ fn handleKey(tree: *node.Tree, n: *node.Node, d: *widget.Edit, k: event.Key) boo
     return true;
 }
 
-/// Ctrl 快捷键：C/V/X 剪贴板（§5.11，经 tree.clipboard 接口）。
+/// Ctrl 快捷键：A 全选 / C/V/X 剪贴板（§5.11，经 tree.clipboard 接口）。
 fn handleShortcut(tree: *node.Tree, n: *node.Node, d: *widget.Edit, vk: u32) bool {
     switch (vk) {
+        0x41 => selectAll(d), // A：全选
         0x43 => copySelection(tree, d), // C
         0x56 => pasteClipboard(tree, d), // V
         0x58 => cutSelection(tree, d), // X
@@ -244,6 +258,12 @@ fn handleShortcut(tree: *node.Tree, n: *node.Node, d: *widget.Edit, vk: u32) boo
     }
     n.invalidatePaint();
     return true;
+}
+
+/// 全选：anchor 到 0，caret 到末尾。
+fn selectAll(d: *widget.Edit) void {
+    d.anchor = 0;
+    d.caret = @intCast(d.buf.len);
 }
 
 fn copySelection(tree: *node.Tree, d: *widget.Edit) void {
@@ -391,6 +411,47 @@ test "edit: insert text advances caret" {
     insertText(&t, &e, "中");
     try std.testing.expectEqualStrings("abc中", e.buf);
     try std.testing.expectEqual(@as(u32, 6), e.caret); // 3 + 3 字节
+}
+
+test "edit: ctrl+a selects all" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    var e = widget.Edit{};
+    insertText(&t, &e, "hello 世界");
+    e.caret = 3;
+    selectAll(&e);
+    try std.testing.expect(e.hasSelection());
+    try std.testing.expectEqual(@as(u32, 0), e.anchor);
+    try std.testing.expectEqual(@as(u32, @intCast(e.buf.len)), e.caret);
+}
+
+test "edit: double-click selects word / single CJK / whitespace run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    var e = widget.Edit{};
+    insertText(&t, &e, "hello 世界 x");
+    // 双击英文词 "hello"（pos 1）：整词。
+    selectWordAt(&e, 1);
+    try std.testing.expectEqual(@as(u32, 0), e.anchor);
+    try std.testing.expectEqual(@as(u32, 5), e.caret);
+    // 双击中文 "世"（pos 6 = 其起始边界）：单个汉字。
+    selectWordAt(&e, 6);
+    try std.testing.expectEqual(@as(u32, 6), e.anchor);
+    try std.testing.expectEqual(@as(u32, 9), e.caret);
+    // 双击空格（pos 5）：单个空格。
+    selectWordAt(&e, 5);
+    try std.testing.expectEqual(@as(u32, 5), e.anchor);
+    try std.testing.expectEqual(@as(u32, 6), e.caret);
+    // 连续空白段（多个空格）：一次选中。
+    var e2 = widget.Edit{};
+    insertText(&t, &e2, "a   b");
+    selectWordAt(&e2, 2); // 空格段中间
+    try std.testing.expectEqual(@as(u32, 1), e2.anchor);
+    try std.testing.expectEqual(@as(u32, 4), e2.caret);
 }
 
 test "edit: caret move without shift clears selection" {
