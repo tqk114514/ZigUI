@@ -1,0 +1,8 @@
+# Zig build 产物
+zig-out/
+.zig-cache/
+
+# 依赖源码解压目录
+zig-pkg/
+
+.trae/

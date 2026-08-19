@@ -1,0 +1,26 @@
+.{
+    .name = .zigui,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x18d03e10e6c1561f,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "ui.zig",
+        "theme.zig",
+        "core",
+        "widgets",
+        "render",
+        "platform",
+        "examples",
+        "checklists",
+        "ci",
+        "rule.md",
+    },
+    .dependencies = .{
+        .win32 = .{
+            .url = "https://github.com/marlersoft/zigwin32/archive/refs/heads/main.tar.gz",
+            .hash = "win32-42.0.39-preview-mX5pFS564gPTezZn4v3TMxRnfJUrZNx1B_F2p2HKXOeG",
+        },
+    },
+}
