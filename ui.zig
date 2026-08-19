@@ -25,6 +25,20 @@ pub const core = struct {
     pub const painter = @import("core/painter.zig");
 };
 
+/// 控件行为层（M2 起）：dispatch 表 + 各控件行为。
+pub const widgets = struct {
+    pub const dispatch = @import("widgets/dispatch.zig");
+    pub const text = @import("widgets/text.zig");
+};
+
+/// 渲染层（M2）：D2D/DWrite 实现。
+pub const render = struct {
+    pub const device = @import("render/device.zig");
+    pub const cache = @import("render/cache.zig");
+    pub const text = @import("render/text.zig");
+    pub const painter = @import("render/painter.zig");
+};
+
 /// 平台层：窗口/消息泵。M0 仅开放最小窗口能力。
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
@@ -48,5 +62,9 @@ test "collect all core module tests" {
     _ = @import("core/node.zig");
     _ = @import("core/event.zig");
     _ = @import("core/painter.zig");
+    _ = @import("widgets/dispatch.zig");
+    _ = @import("widgets/text.zig");
+    _ = @import("render/cache.zig");
+    _ = @import("render/text.zig");
     _ = @import("platform/window.zig");
 }

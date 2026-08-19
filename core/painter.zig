@@ -18,6 +18,22 @@ pub const TextLayout = struct {
     payload: *anyopaque = undefined,
 };
 
+/// TextSystem 接口（§5.7）：layout 必须命中缓存（L4 稳态零分配）。
+/// core 只定义接口；render/text.zig 提供 DWrite 实现，测试用 Mock 提供假尺寸。
+pub const TextSystem = struct {
+    vtable: *const VTable,
+    impl: *anyopaque,
+
+    pub const VTable = struct {
+        /// 生成文本布局。max_width ≤ 0 表示不换行。返回 TextLayout 指针（实现侧持有，勿释放）。
+        layout: *const fn (impl: *anyopaque, text: []const u8, font: *const theme.Font, max_width: f32) ?*TextLayout,
+    };
+
+    pub fn layout(self: TextSystem, text: []const u8, font: *const theme.Font, max_width: f32) ?*TextLayout {
+        return self.vtable.layout(self.impl, text, font, max_width);
+    }
+};
+
 /// PaintCtx 接口：render 实现必须满足（§5.6）。
 /// `impl` 是实现侧对象指针，vtable 方法以其为 opaque 参数被调用。
 pub const PaintCtx = struct {

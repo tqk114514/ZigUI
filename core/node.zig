@@ -12,6 +12,7 @@ const geo = @import("geometry.zig");
 const layout = @import("layout.zig");
 const widget = @import("widget.zig");
 const event = @import("event.zig");
+const painter = @import("painter.zig");
 const theme = @import("../theme.zig");
 
 /// 事件处理器：返回 true 停止冒泡（§5.3）。ctx 由 handler_ctx 传入（§5.8 trampoline）。
@@ -75,6 +76,13 @@ pub const Node = struct {
     }
 };
 
+/// 控件行为分发表（§5.4）：widgets/dispatch.zig 提供实现，Tree 持引用。
+/// core 不 import widgets（避免环），仅通过函数指针调用。
+pub const DispatchTable = struct {
+    measureWidget: *const fn (tree: *Tree, n: *Node, c: layout.Constraints) geo.Size,
+    paintWidget: *const fn (tree: *Tree, n: *Node, pc: painter.PaintCtx) void,
+};
+
 pub const Tree = struct {
     arena: std.heap.ArenaAllocator,
     root: *Node,
@@ -82,6 +90,10 @@ pub const Tree = struct {
     hover: ?*Node = null,
     active: ?*Node = null,
     theme_ref: *const theme.Theme,
+    /// 文本系统（§5.7）：text 控件 measure 消费 bounds。默认 null（无文本能力）。
+    text_system: ?painter.TextSystem = null,
+    /// 控件行为分发表（§5.4）。默认 null（无内建控件行为）。
+    dispatch_table: ?*const DispatchTable = null,
     /// 观测用：arrange 实际重排子树的次数（测试断言传播终止）。
     relayout_count: usize = 0,
 
@@ -94,6 +106,11 @@ pub const Tree = struct {
         tree.root = try tree.alloc(Node);
         tree.root.* = .{ .layout = .{ .column = .{} }, .parent = null };
         return tree;
+    }
+
+    /// 遍历绘制（§5.4 paintTree 顺序）。pc 是 render 实现的 PaintCtx。
+    pub fn paint(t: *Tree, pc: painter.PaintCtx) void {
+        paintNode(t, pc, t.root);
     }
 
     pub fn deinit(t: *Tree) void {
@@ -174,9 +191,12 @@ pub const Tree = struct {
     }
 
     fn computeSize(t: *Tree, n: *Node, c: layout.Constraints) geo.Size {
-        // 内建叶子控件（M2/M3 才有真实 measure）：M1 先按无内容处理。
+        // 叶子控件：行为经 DispatchTable 委托（§5.4）；无 dispatch 时按空处理。
         switch (n.widget) {
-            .text, .button, .edit => return c.constrain(.{}),
+            .text, .button, .edit => {
+                if (t.dispatch_table) |d| return c.constrain(d.measureWidget(t, n, c.loosen()));
+                return c.constrain(.{});
+            },
             .custom => |cu| return c.constrain(cu.vtable.measure(cu.ctx, c.loosen())),
             else => {}, // box / none / scroll 走布局容器
         }
@@ -338,6 +358,30 @@ pub const Tree = struct {
 fn rectEq(a: geo.Rect, b: geo.Rect) bool {
     return geo.approxEq(a.x, b.x) and geo.approxEq(a.y, b.y) and
         geo.approxEq(a.w, b.w) and geo.approxEq(a.h, b.h);
+}
+
+/// paintTree 顺序（§5.4）：可见性 → 裁剪剔除 → Node 层背景/边框 → 控件内容 →
+/// 内容区 pushClip → 递归子节点 → popClip。paint 不写树状态（L6）。
+fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
+    if (!n.flags.visible) return;
+    if (!pc.clipIntersects(n.rect)) return;
+
+    // Node 层统一绘制背景与边框（控件不得重复实现描边，§5.3）。
+    if (n.style.bg) |bg| pc.fillRect(n.rect, bg);
+    if (n.style.border_color) |bc| {
+        if (n.style.border_width > 0) {
+            pc.strokeRect(n.rect, bc, n.style.border_width, t.theme_ref.radius.small);
+        }
+    }
+
+    // 控件自身内容。
+    if (t.dispatch_table) |d| d.paintWidget(t, n, pc);
+
+    // 内容区裁剪后递归子节点。
+    const inner = n.rect.inset(n.style.padding);
+    pc.pushClip(inner);
+    for (n.children) |c| paintNode(t, pc, c);
+    pc.popClip();
 }
 
 // —— 测试辅助：固定尺寸的 custom 叶子 ——
