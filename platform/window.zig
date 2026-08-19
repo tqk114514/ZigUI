@@ -16,12 +16,16 @@ const builtin = @import("builtin");
 const w32 = @import("win32.zig");
 const node = @import("../core/node.zig");
 const geometry = @import("../core/geometry.zig");
+const event = @import("../core/event.zig");
+const widget = @import("../core/widget.zig");
 const dispatch = @import("../widgets/dispatch.zig");
 const device_mod = @import("../render/device.zig");
 const painter_mod = @import("../render/painter.zig");
 const text_mod = @import("../render/text.zig");
 const post_mod = @import("post.zig");
 const input_mod = @import("input.zig");
+const ime_mod = @import("ime.zig");
+const clipboard_mod = @import("clipboard.zig");
 const theme = @import("../theme.zig");
 
 const log = std.log.scoped(.platform);
@@ -64,7 +68,18 @@ const WindowCtx = struct {
     /// 帧钩子（§4.9 bench）。
     frame_hook: ?*const fn (user_ctx: ?*anyopaque) void = null,
     frame_hook_ctx: ?*anyopaque = null,
+    /// IMM32 输入法上下文（§5.10）。
+    ime: ime_mod.Ime = undefined,
+    /// 光标闪烁定时器是否已创建（§5.8：只在聚焦时创建一次，避免每次事件重置导致不闪烁）。
+    caret_timer_active: bool = false,
+    /// 透明位图（系统 caret 用：全 0 单色位图，显示不可见但 GetCaretPos 定位有效）。
+    caret_bmp: ?w32.gdi.HBITMAP = null,
+    /// WM_CHAR 代理对暂存（emoji 等，§5.9：WM_CHAR 是 text_input 唯一来源）。
+    surrogate_high: u16 = 0,
 };
+
+/// 光标闪烁定时器 ID（§5.8：WM_TIMER 530ms，仅 focus 时启动）。
+const TIMER_CARET: usize = 1;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zigui.m0");
 
@@ -80,6 +95,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
 
     // 装配控件行为与文本系统（render 提供）。
     tree.dispatch_table = &dispatch.table;
+    // 装配剪贴板接口（§5.11）：Edit 复制/粘贴经 tree.clipboard。
+    tree.clipboard = clipboard_mod.asClipboard();
 
     // 2. 注册窗口类。
     const hinst = w32.kernel32.GetModuleHandleW(null) orelse return error.GetModuleHandleFailed;
@@ -158,6 +175,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .on_close_ctx = opts.on_close_ctx,
         .frame_hook = opts.frame_hook,
         .frame_hook_ctx = opts.frame_hook_ctx,
+        .ime = .{ .hwnd = hwnd },
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
 
@@ -214,6 +232,77 @@ fn renderFrame(ctx: *WindowCtx) void {
     }
     // 帧钩子（§4.9）：本帧绘制完成，供 bench 统计帧耗时。
     if (ctx.frame_hook) |f| f(ctx.frame_hook_ctx);
+    // IME 组合窗/候选框跟随（§5.10）：焦点 Edit paint 后回报 caret 屏幕物理坐标。
+    reportImeCaret(ctx);
+}
+
+/// IME caret 跟随（§5.10）：计算焦点 Edit 的光标物理坐标。
+/// 1) SetCaretPos 设置系统光标（客户区坐标）——微软拼音等只根据系统光标定位候选框；
+/// 2) ime.updateCaret 用屏幕坐标设组合窗/候选框位置。
+fn reportImeCaret(ctx: *WindowCtx) void {
+    const f = ctx.tree.focus orelse return;
+    if (f.widget != .edit) return;
+    const ts = ctx.tree.text_system orelse return;
+    const d = f.widget.edit;
+    var dip_x: f32 = widget.Edit.pad_h;
+    if (d.caret > 0) {
+        // 含尾随空白宽度：光标紧跟空格时位置正确（与 widgets/edit.zig 的 prefixWidth 一致）。
+        if (ts.layout(d.buf[0..d.caret], &ctx.theme_ref.font_ui, 1_000_000.0, .{})) |tl| {
+            dip_x += tl.width_with_ws;
+        }
+    }
+    // DIP（内容区）→ 物理像素（客户区）。
+    const scale = ctx.device.?.dpi_scale;
+    const client_x: i32 = @intFromFloat((f.rect.x + dip_x) * scale);
+    const client_y: i32 = @intFromFloat((f.rect.y + widget.Edit.pad_v) * scale);
+    // 系统光标跟随（某些 IME 只按系统光标定位候选框，§5.10 实践）。
+    _ = w32.user32.SetCaretPos(client_x, client_y);
+    // 组合窗/候选框：ImmSet*Window 的 ptCurrentPos 用客户区坐标（GetCaretPos 同坐标系）。
+    ctx.ime.updateCaret(client_x, client_y);
+}
+
+/// 焦点是 Edit 时启动光标闪烁定时器，否则销毁（§5.8：WM_TIMER 530ms，仅 focus）。
+/// 定时器只在聚焦时创建一次——WM_TIMER 持续翻转实现闪烁；操作只重置相位为可见
+/// （立即显示光标），不重置定时器（否则连续操作期间不闪烁）。
+/// 同时创建系统 caret（隐藏，仅供 IME 的 GetCaretPos 定位候选框，§5.10）。
+fn syncCaretTimer(ctx: *WindowCtx) void {
+    const is_edit = if (ctx.tree.focus) |f| f.widget == .edit else false;
+    if (is_edit) {
+        ctx.tree.caret_blink_on = true; // 操作后立即可见。
+        if (!ctx.caret_timer_active) {
+            _ = w32.user32.SetTimer(ctx.hwnd, TIMER_CARET, 530, null);
+            ctx.caret_timer_active = true;
+        }
+        // 透明位图 caret：全 0 单色位图（0 位显示为背景色），系统即使显示也完全不可见；
+        // caret 仍存在，SetCaretPos/GetCaretPos 供 IME 定位候选框（§5.10）。
+        // 视觉光标由 Edit 自绘。
+        if (ctx.caret_bmp == null) {
+            const zero: [1]u8 = .{0};
+            ctx.caret_bmp = w32.gdi32.CreateBitmap(1, 1, 1, 1, &zero);
+        }
+        if (ctx.caret_bmp) |bmp| {
+            _ = w32.user32.CreateCaret(ctx.hwnd, bmp, 1, 1);
+        }
+    } else {
+        if (ctx.caret_timer_active) {
+            _ = w32.user32.KillTimer(ctx.hwnd, TIMER_CARET);
+            ctx.caret_timer_active = false;
+        }
+        _ = w32.user32.DestroyCaret();
+        if (ctx.caret_bmp) |bmp| {
+            _ = w32.gdi32.DeleteObject(bmp);
+            ctx.caret_bmp = null;
+        }
+    }
+}
+
+/// 释放 IME 事件分配的文本（§5.10：生命周期 = 当前事件）。空串为字面量，跳过。
+fn freeImeEventText(e: event.Event) void {
+    switch (e) {
+        .text_input => |t| if (t.text.len > 0) std.heap.page_allocator.free(t.text),
+        .ime_compose => |t| if (t.text.len > 0) std.heap.page_allocator.free(t.text),
+        else => {},
+    }
 }
 
 /// 客户端尺寸（DIP）：物理像素 / dpi_scale。
@@ -232,6 +321,38 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
     switch (u_msg) {
         w32.windows_and_messaging.WM_DESTROY => {
             w32.user32.PostQuitMessage(0);
+            return 0;
+        },
+        w32.windows_and_messaging.WM_SETFOCUS => {
+            if (ctx != null) {
+                // 重新激活：启用输入法；若焦点是 Edit，恢复光标定时器/系统 caret。
+                ctx.?.ime.activate();
+                syncCaretTimer(ctx.?);
+            }
+            return 0;
+        },
+        w32.windows_and_messaging.WM_KILLFOCUS => {
+            if (ctx != null) {
+                // 失活：停止闪烁 + 销毁系统 caret + 停用 IME（强制完成组合）+ 取消 Edit 焦点。
+                if (ctx.?.caret_timer_active) {
+                    _ = w32.user32.KillTimer(hwnd, TIMER_CARET);
+                    ctx.?.caret_timer_active = false;
+                }
+                _ = w32.user32.DestroyCaret();
+                ctx.?.ime.deactivate();
+                // 失活时若 Edit 在组合：清理组合状态；并取消焦点（不再高亮选中）。
+                if (ctx.?.tree.focus) |f| {
+                    if (f.widget == .edit) {
+                        if (f.widget.edit.composing) {
+                            var ev = event.Event{ .ime_compose = .{ .text = "" } };
+                            _ = ctx.?.tree.dispatch(&ev);
+                        }
+                        ctx.?.tree.setFocus(null);
+                    }
+                }
+                // 立即重绘去掉 Edit 高亮（仅标脏不会立刻刷新）。
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            }
             return 0;
         },
         w32.windows_and_messaging.WM_PAINT => {
@@ -273,6 +394,8 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                     _ = ctx.?.tree.dispatch(&e);
                     // 事件可能改树状态（hover/active/文本等）：请求重绘（保留模式）。
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                    // WM_MOUSEMOVE 不重置光标闪烁相位——否则鼠标悬停时 blink 恒 true，光标不闪。
+                    if (u_msg != w32.windows_and_messaging.WM_MOUSEMOVE) syncCaretTimer(ctx.?);
                 }
             }
             return 0;
@@ -289,7 +412,87 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                     _ = ctx.?.tree.dispatch(&e);
                     // 焦点变化等：请求重绘（保留模式）。
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                    syncCaretTimer(ctx.?);
                 }
+            }
+            return 0;
+        },
+        // —— WM_CHAR：text_input 的唯一来源（§5.9）；禁止从 KEYDOWN 推断字符 ——
+        w32.windows_and_messaging.WM_CHAR => {
+            if (ctx != null) {
+                // wParam 为 UTF-16 code unit；代理对分两次到达，需累积（emoji）。
+                const code: u16 = @truncate(w_param);
+                // 控制字符（Tab/Backspace/Enter 等）不是文本输入：WM_KEYDOWN 已处理
+                // （焦点环/退格）。禁止在此作为 text_input 插入（§5.9）。
+                if (code < 0x20) {
+                    ctx.?.surrogate_high = 0;
+                    return 0;
+                }
+                if (code >= 0xD800 and code <= 0xDBFF) {
+                    ctx.?.surrogate_high = code; // 暂存高代理。
+                    return 0;
+                }
+                var cp: u21 = undefined;
+                if (code >= 0xDC00 and code <= 0xDFFF and ctx.?.surrogate_high != 0) {
+                    cp = 0x10000 + (@as(u21, ctx.?.surrogate_high - 0xD800) << 10) + (code - 0xDC00);
+                    ctx.?.surrogate_high = 0;
+                } else {
+                    ctx.?.surrogate_high = 0;
+                    cp = code;
+                }
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &buf) catch return 0;
+                var ev = event.Event{ .text_input = .{ .text = buf[0..len] } };
+                _ = ctx.?.tree.dispatch(&ev);
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                syncCaretTimer(ctx.?);
+            }
+            return 0;
+        },
+        // —— WM_IME 系列：ime.zig 独占处理（§5.9/§5.10）——
+        w32.windows_and_messaging.WM_IME_SETCONTEXT => {
+            if (ctx != null) reportImeCaret(ctx.?);
+            // 不清除 ISC 标志（清除组合窗标志会联动抑制微软拼音候选框）：
+            // 组合窗隐藏靠 WM_IME_STARTCOMPOSITION 返回 0（示例实测）。
+            const raw_isc: u32 = @as(u32, @truncate(@as(u64, @bitCast(l_param))));
+            log.debug("ime: SETCONTEXT isc=0x{x}", .{raw_isc});
+            return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
+        },
+        w32.windows_and_messaging.WM_IME_STARTCOMPOSITION => {
+            if (ctx != null) reportImeCaret(ctx.?);
+            // 必须返回 0：示例实测——系统组合窗仅在 STARTCOMPOSITION 返回 0 时隐藏。
+            log.debug("ime: STARTCOMPOSITION (return 0)", .{});
+            return 0;
+        },
+        w32.windows_and_messaging.WM_IME_ENDCOMPOSITION => {
+            if (ctx != null) {
+                log.debug("ime: ENDCOMPOSITION", .{});
+                var ev = event.Event{ .ime_compose = .{ .text = "" } };
+                _ = ctx.?.tree.dispatch(&ev);
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            }
+            return 0;
+        },
+        w32.windows_and_messaging.WM_IME_COMPOSITION => {
+            if (ctx != null) {
+                // 结果串 → text_input（提交）；组合串 → ime_compose（§5.10）。
+                if (ctx.?.ime.compositionEvent(std.heap.page_allocator, l_param)) |ev| {
+                    defer freeImeEventText(ev);
+                    var e = ev;
+                    _ = ctx.?.tree.dispatch(&e);
+                    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                    syncCaretTimer(ctx.?);
+                }
+                // 组合串变化后刷新系统光标/候选框位置。
+                reportImeCaret(ctx.?);
+            }
+            return 0;
+        },
+        // —— WM_TIMER：光标闪烁（§5.8，仅 focus 时 530ms）——
+        w32.windows_and_messaging.WM_TIMER => {
+            if (ctx != null and w_param == TIMER_CARET) {
+                ctx.?.tree.caret_blink_on = !ctx.?.tree.caret_blink_on;
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
             }
             return 0;
         },

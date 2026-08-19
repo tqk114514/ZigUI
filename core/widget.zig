@@ -29,9 +29,34 @@ pub const Button = struct {
     label: []const u8,
 };
 
-/// 编辑框控件数据（M5 是最难控件，字段届时随规格补充；M1 仅占位）。
+/// 编辑框控件数据（M5）。
+///
+/// 状态机（§5.8）：
+///   normal ↔ has_selection ↔ composing(IME)
+/// - buf 始终合法 UTF-8；caret/anchor 只落在码点边界（core/utf8 步进）；
+/// - composing 期间 buf 与 caret 冻结，组合串显示在 caret 处（带下划线）；
+/// - 组合提交合并为一步 undo（undo M6 交付，M5 先留位）。
 pub const Edit = struct {
+    /// 缓冲区（arena，始终合法 UTF-8）。
     buf: []const u8 = "",
+    /// 光标（字节偏移，码点边界）。
+    caret: u32 = 0,
+    /// 选区锚点（字节偏移，码点边界）。== caret 表示无选区（normal）。
+    anchor: u32 = 0,
+    /// IME 组合串（arena；composing 时非空）。
+    compose_text: []const u8 = "",
+    /// 是否 IME composing 中（buf/caret 冻结，§5.8）。
+    composing: bool = false,
+    /// 是否鼠标拖选中（pointer_down 置位，pointer_up 清除，§5.8）。
+    dragging: bool = false,
+    /// 内容区内边距（DIP）。widgets/edit.zig 与 platform/window.zig（IME caret 定位）共用。
+    pub const pad_h: f32 = 8;
+    pub const pad_v: f32 = 4;
+
+    /// 是否有选区（anchor != caret）。
+    pub fn hasSelection(self: Edit) bool {
+        return self.anchor != self.caret;
+    }
 };
 
 /// 滚动容器数据（M6；M1 占位）。

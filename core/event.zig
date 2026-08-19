@@ -15,6 +15,8 @@ pub const Pointer = struct {
     /// 修饰键与按钮位（M3 触手把手补充具体枚举；M1 先留位）。
     mods: u32 = 0,
     button: Button = .left,
+    /// 是否双击（WM_LBUTTONDBLCLK；Edit 双击选词用，M5）。
+    double: bool = false,
 };
 
 /// 鼠标按钮。
@@ -26,18 +28,22 @@ pub const Key = struct {
     mods: u32 = 0,
 };
 
-/// 虚拟键码（Win32 VK_* 子集，M3 所需）。值对齐 Win32。
+/// 虚拟键码（Win32 VK_* 子集，M3/M5 所需）。值对齐 Win32。
 pub const VK = struct {
+    pub const BACKSPACE: u32 = 0x08;
     pub const TAB: u32 = 0x09;
     pub const RETURN: u32 = 0x0D;
     pub const SHIFT: u32 = 0x10;
     pub const CONTROL: u32 = 0x11;
     pub const MENU: u32 = 0x12;
+    pub const SPACE: u32 = 0x20;
+    pub const END: u32 = 0x23;
+    pub const HOME: u32 = 0x24;
     pub const LEFT: u32 = 0x25;
     pub const UP: u32 = 0x26;
     pub const RIGHT: u32 = 0x27;
     pub const DOWN: u32 = 0x28;
-    pub const SPACE: u32 = 0x20;
+    pub const DELETE: u32 = 0x2E;
 };
 
 /// 修饰键位（mods 字段）。
@@ -52,6 +58,13 @@ pub const TextInput = struct {
     text: []const u8 = "",
 };
 
+/// IME 组合串事件（M5 §5.10）：组合内容变化时派发。组合串的 arena 生命周期
+/// = 当前事件，Edit 需留存须自行拷贝（§5.10）。
+pub const ImeCompose = struct {
+    /// 当前组合串（UTF-8，事件期有效）。
+    text: []const u8 = "",
+};
+
 /// 事件联合。新增事件类型时，node.dispatch 的 switch 必须穷尽（编译器强制）。
 pub const Event = union(enum) {
     pointer_down: Pointer,
@@ -60,6 +73,8 @@ pub const Event = union(enum) {
     key_down: Key,
     key_up: Key,
     text_input: TextInput,
+    /// M5：IME 组合串变化（§5.10）。
+    ime_compose: ImeCompose,
     focus_gained,
     focus_lost,
     custom: u32,

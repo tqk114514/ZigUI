@@ -25,6 +25,10 @@ pub fn pointerEvent(u_msg: u32, l_param: w32.LPARAM, scale: f32) ?event.Event {
             wm.WM_MBUTTONDOWN, wm.WM_MBUTTONUP, wm.WM_MBUTTONDBLCLK => .middle,
             else => .left, // WM_MOUSEMOVE 无按钮，left 仅为占位
         },
+        .double = switch (u_msg) {
+            wm.WM_LBUTTONDBLCLK, wm.WM_RBUTTONDBLCLK, wm.WM_MBUTTONDBLCLK => true,
+            else => false,
+        },
     };
     return switch (u_msg) {
         wm.WM_MOUSEMOVE => event.Event{ .pointer_move = p },

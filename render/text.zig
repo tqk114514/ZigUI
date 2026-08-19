@@ -165,7 +165,11 @@ pub const TextSystemImpl = struct {
 
         entry = try self.allocator.create(LayoutEntry);
         entry.?.* = .{
-            .tl = .{ .bounds = .{ .width = bw, .height = metrics.height }, .payload = raw_layout },
+            .tl = .{
+                .bounds = .{ .width = bw, .height = metrics.height },
+                .width_with_ws = metrics.widthIncludingTrailingWhitespace,
+                .payload = raw_layout,
+            },
             .dw_layout = raw_layout,
             .ellipsis_sign = ellipsis_sign,
         };

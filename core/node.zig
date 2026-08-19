@@ -76,11 +76,33 @@ pub const Node = struct {
     }
 };
 
+/// 剪贴板接口（M5 §5.11）：platform 实现，Edit 复制/粘贴经此（widgets 不碰平台）。
+pub const Clipboard = struct {
+    vtable: *const VTable,
+    impl: *anyopaque,
+
+    pub const VTable = struct {
+        /// 读取剪贴板文本（UTF-8，分配于 allocator，调用方负责释放）。无文本返回 null。
+        read: *const fn (impl: *anyopaque, allocator: std.mem.Allocator) ?[]const u8,
+        /// 写入剪贴板文本（UTF-8）。失败静默（§5.11 不 panic）。
+        write: *const fn (impl: *anyopaque, text: []const u8) void,
+    };
+
+    pub fn read(self: Clipboard, allocator: std.mem.Allocator) ?[]const u8 {
+        return self.vtable.read(self.impl, allocator);
+    }
+    pub fn write(self: Clipboard, text: []const u8) void {
+        self.vtable.write(self.impl, text);
+    }
+};
+
 /// 控件行为分发表（§5.4）：widgets/dispatch.zig 提供实现，Tree 持引用。
 /// core 不 import widgets（避免环），仅通过函数指针调用。
 pub const DispatchTable = struct {
     measureWidget: *const fn (tree: *Tree, n: *Node, c: layout.Constraints) geo.Size,
     paintWidget: *const fn (tree: *Tree, n: *Node, pc: painter.PaintCtx) void,
+    /// M5：内建控件的事件处理（Edit 等，§5.8 状态机）。返回 true = 已消费、停止冒泡。
+    onEvent: *const fn (tree: *Tree, n: *Node, e: *const event.Event) bool,
 };
 
 pub const Tree = struct {
@@ -92,8 +114,12 @@ pub const Tree = struct {
     theme_ref: *const theme.Theme,
     /// 文本系统（§5.7）：text 控件 measure 消费 bounds。默认 null（无文本能力）。
     text_system: ?painter.TextSystem = null,
+    /// 剪贴板接口（§5.11）：platform 装配实现，Edit 复制/粘贴经此（widgets 不碰平台）。
+    clipboard: ?Clipboard = null,
     /// 控件行为分发表（§5.4）。默认 null（无内建控件行为）。
     dispatch_table: ?*const DispatchTable = null,
+    /// 光标闪烁相位（§5.8 编辑框 WM_TIMER 530ms 翻转；Edit paint 只读，不写）。
+    caret_blink_on: bool = true,
     /// 观测用：arrange 实际重排子树的次数（测试断言传播终止）。
     relayout_count: usize = 0,
 
@@ -308,16 +334,34 @@ pub const Tree = struct {
                     t.hover = hit;
                     if (hit) |n| n.invalidatePaint();
                 }
+                // 拖选：active 的 Edit 处理 pointer_move（即使移出边界）。
+                if (t.active) |a| {
+                    if (t.dispatch_table) |dt| {
+                        if (dt.onEvent(t, a, e)) return true;
+                    }
+                }
                 return if (hit) |n| bubble(t, n, e) else false;
             },
             .pointer_down => |p| {
                 const hit = hitTest(t.root, p.pos) orelse {
-                    // 点空白：清 active（M3：不抢焦点，焦点变化留待后续策略）。
+                    // 点空白：清 active 并取消焦点（点击空白让 Edit 失焦，§5.3）。
                     t.active = null;
+                    if (t.focus != null) t.setFocus(null);
                     return false;
                 };
                 t.active = hit;
                 hit.invalidatePaint();
+                // 点击 focusable 节点转移焦点（焦点环，§5.3）；点击非 focusable
+                // （容器/文本等空白）取消焦点——column 占满时"空白"会命中容器。
+                if (hit.flags.focusable and !hit.flags.disabled) {
+                    t.setFocus(hit);
+                } else if (t.focus != null) {
+                    t.setFocus(null);
+                }
+                // 内建控件指针处理（Edit 点选/双击选词，§5.8）优先。
+                if (t.dispatch_table) |dt| {
+                    if (dt.onEvent(t, hit, e)) return true;
+                }
                 return bubble(t, hit, e);
             },
             .pointer_up => |p| {
@@ -325,6 +369,10 @@ pub const Tree = struct {
                 if (t.active) |a| {
                     t.active = null;
                     a.invalidatePaint();
+                    // 内建控件收尾（Edit 结束拖选）。
+                    if (t.dispatch_table) |dt| {
+                        if (dt.onEvent(t, a, e)) return true;
+                    }
                     // click 语义（§5.8）：仅"按下与抬起同一节点"时才沿该节点冒泡，
                     // 触发其 handler；否则视为拖动/误触，不派发。
                     if (hit == a) return bubble(t, a, e);
@@ -342,6 +390,10 @@ pub const Tree = struct {
                     return false;
                 }
                 const f = t.focus orelse return false;
+                // 内建控件事件（Edit 键盘操作，§5.8）优先于用户 handler。
+                if (t.dispatch_table) |dt| {
+                    if (dt.onEvent(t, f, e)) return true;
+                }
                 return bubble(t, f, e);
             },
             .key_up => {
@@ -349,9 +401,12 @@ pub const Tree = struct {
                 return bubble(t, f, e);
             },
             .focus_gained, .focus_lost => return false,
-            .text_input, .custom => {
-                // 文本输入交给焦点；custom 交根。
+            .text_input, .ime_compose, .custom => {
+                // 文本输入/IME 交给焦点；custom 交根。内建控件优先处理。
                 const target = t.focus orelse t.root;
+                if (t.dispatch_table) |dt| {
+                    if (dt.onEvent(t, target, e)) return true;
+                }
                 return bubble(t, target, e);
             },
         }

@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// M4 提供的示例清单。
+/// M5 提供的示例清单。
 const M0_EXAMPLES = [_][]const u8{
     "theme_preview",
     "counter",
@@ -68,6 +68,7 @@ const M0_EXAMPLES = [_][]const u8{
     "threads",
     "text",
     "bench",
+    "edit",
 };
 
 /// zig-win32 只提供声明；系统库的链接在 Zig 0.16 中位于 Module 层（规则 §5.9

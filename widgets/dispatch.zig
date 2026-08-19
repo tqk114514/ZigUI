@@ -13,11 +13,14 @@ const node = @import("../core/node.zig");
 const painter = @import("../core/painter.zig");
 const text = @import("text.zig");
 const button = @import("button.zig");
+const edit = @import("edit.zig");
+const event = @import("../core/event.zig");
 
 /// 供 Tree 引用的分发表实例。
 pub const table: node.DispatchTable = .{
     .measureWidget = measureWidget,
     .paintWidget = paintWidget,
+    .onEvent = onEvent,
 };
 
 /// 对叶子控件求 measure。只被 core 在"该节点是叶子控件"时调用。
@@ -27,7 +30,7 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
         .box => unreachable, // 同上
         .text => |d| text.measure(tree, d, c),
         .button => |d| button.measure(tree, d, c),
-        .edit => .{}, // M5 交付
+        .edit => |d| edit.measure(tree, d, c),
         .scroll => .{}, // M6 交付
         .custom => unreachable, // custom 走自身 vtable，不经此路由
     };
@@ -39,9 +42,18 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
         .none, .box => {},
         .text => |d| text.paint(tree, pc, n.rect, d),
         .button => |d| button.paint(tree, pc, n, d),
-        .edit, .scroll => {},
+        .edit => |d| edit.paint(tree, pc, n, d),
+        .scroll => {},
         .custom => {},
     }
+}
+
+/// 内建控件事件处理（§5.4/§5.8）：Edit 键盘/文本/IME。返回 true = 已消费。
+fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
+    return switch (n.widget) {
+        .edit => edit.onEvent(tree, n, e),
+        else => false, // 非内建事件控件：不消费，交回 bubble（用户 handler）。
+    };
 }
 
 test "dispatch table routes text measure" {

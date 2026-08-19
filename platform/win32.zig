@@ -51,6 +51,8 @@ pub const foundation = zw.foundation;
 pub const windows_and_messaging = zw.ui.windows_and_messaging;
 pub const hi_dpi = zw.ui.hi_dpi;
 pub const system_information = zw.system.system_information;
+pub const system_ole = zw.system.ole; // 剪贴板格式（CF_UNICODETEXT 等）
+pub const globalization = zw.globalization; // HIMC/HKL 等输入法句柄
 
 // —— 渲染命名空间（M2 起启用，先留出口）——
 pub const direct2d = zw.graphics.direct2d;

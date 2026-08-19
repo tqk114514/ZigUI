@@ -46,6 +46,15 @@ pub fn button(tree: *node.Tree, parent: *node.Node, label: []const u8) !*node.No
     return n;
 }
 
+/// 创建单行编辑框节点（buf 拷贝入 arena）。可聚焦；键盘/IME 输入为内建行为（§5.8）。
+pub fn edit(tree: *node.Tree, parent: *node.Node, initial: []const u8) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.widget = .{ .edit = .{ .buf = try tree.allocStr(initial) } };
+    n.flags.focusable = true;
+    try tree.appendChild(parent, n);
+    return n;
+}
+
 /// 便捷：给节点设置 id（拷贝入 arena），供 find(id) 定位。
 pub fn setNodeId(tree: *node.Tree, n: *node.Node, id: []const u8) !void {
     n.id = try tree.allocStr(id);
