@@ -64,6 +64,11 @@ pub const PaintCtx = struct {
         pushClip: *const fn (impl: *anyopaque, rect: geo.Rect) void,
         popClip: *const fn (impl: *anyopaque) void,
         clipIntersects: *const fn (impl: *anyopaque, rect: geo.Rect) bool,
+        // M7 视觉原语（§5.6）：控件画勾号/圆拇指/圆角填充等。实现侧须缓存对象（L4/§5.6）。
+        fillRoundedRect: *const fn (impl: *anyopaque, rect: geo.Rect, radius: f32, color: theme.Color) void,
+        strokeLine: *const fn (impl: *anyopaque, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: theme.Color) void,
+        strokePolyline: *const fn (impl: *anyopaque, points: []const geo.Point, width: f32, color: theme.Color) void,
+        fillEllipse: *const fn (impl: *anyopaque, center: geo.Point, rx: f32, ry: f32, color: theme.Color) void,
     };
 
     pub fn fillRect(self: PaintCtx, rect: geo.Rect, color: theme.Color) void {
@@ -84,6 +89,22 @@ pub const PaintCtx = struct {
     pub fn clipIntersects(self: PaintCtx, rect: geo.Rect) bool {
         return self.vtable.clipIntersects(self.impl, rect);
     }
+    /// 圆角填充（radius ≤ 0 等同 fillRect）。
+    pub fn fillRoundedRect(self: PaintCtx, rect: geo.Rect, radius: f32, color: theme.Color) void {
+        self.vtable.fillRoundedRect(self.impl, rect, radius, color);
+    }
+    /// 单线段（勾号/图标）。
+    pub fn strokeLine(self: PaintCtx, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: theme.Color) void {
+        self.vtable.strokeLine(self.impl, x0, y0, x1, y1, width, color);
+    }
+    /// 折线（≥2 点，勾号/简单图标）。points 为调用方栈上切片，帧路径不分配。
+    pub fn strokePolyline(self: PaintCtx, points: []const geo.Point, width: f32, color: theme.Color) void {
+        self.vtable.strokePolyline(self.impl, points, width, color);
+    }
+    /// 实心椭圆（圆拇指/未来 radio 点）。
+    pub fn fillEllipse(self: PaintCtx, center: geo.Point, rx: f32, ry: f32, color: theme.Color) void {
+        self.vtable.fillEllipse(self.impl, center, rx, ry, color);
+    }
 };
 
 /// MockPainter：录制 draw call 序列供测试断言。
@@ -103,6 +124,10 @@ pub const MockPainter = struct {
         drawText: struct { rect: geo.Rect, color: theme.Color },
         pushClip: geo.Rect,
         popClip,
+        fillRoundedRect: struct { rect: geo.Rect, radius: f32, color: theme.Color },
+        strokeLine: struct { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: theme.Color },
+        strokePolyline: struct { points: []const geo.Point, width: f32, color: theme.Color },
+        fillEllipse: struct { center: geo.Point, rx: f32, ry: f32, color: theme.Color },
     };
 
     var vtable: PaintCtx.VTable = .{
@@ -112,6 +137,10 @@ pub const MockPainter = struct {
         .pushClip = implPushClip,
         .popClip = implPopClip,
         .clipIntersects = implClipIntersects,
+        .fillRoundedRect = implFillRoundedRect,
+        .strokeLine = implStrokeLine,
+        .strokePolyline = implStrokePolyline,
+        .fillEllipse = implFillEllipse,
     };
 
     /// 在堆上构造并返回（impl 指针须稳定指向自身体例，值类型会被拷贝导致悬垂）。
@@ -157,6 +186,22 @@ pub const MockPainter = struct {
         const s: *MockPainter = @ptrCast(@alignCast(impl));
         if (s.clip_rect) |c| return c.intersects(rect);
         return true; // Mock 默认不剔除；测试可设 clip_rect。
+    }
+    fn implFillRoundedRect(impl: *anyopaque, rect: geo.Rect, radius: f32, color: theme.Color) void {
+        const s: *MockPainter = @ptrCast(@alignCast(impl));
+        s.calls.append(s.allocator, .{ .fillRoundedRect = .{ .rect = rect, .radius = radius, .color = color } }) catch unreachable;
+    }
+    fn implStrokeLine(impl: *anyopaque, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: theme.Color) void {
+        const s: *MockPainter = @ptrCast(@alignCast(impl));
+        s.calls.append(s.allocator, .{ .strokeLine = .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .width = width, .color = color } }) catch unreachable;
+    }
+    fn implStrokePolyline(impl: *anyopaque, points: []const geo.Point, width: f32, color: theme.Color) void {
+        const s: *MockPainter = @ptrCast(@alignCast(impl));
+        s.calls.append(s.allocator, .{ .strokePolyline = .{ .points = points, .width = width, .color = color } }) catch unreachable;
+    }
+    fn implFillEllipse(impl: *anyopaque, center: geo.Point, rx: f32, ry: f32, color: theme.Color) void {
+        const s: *MockPainter = @ptrCast(@alignCast(impl));
+        s.calls.append(s.allocator, .{ .fillEllipse = .{ .center = center, .rx = rx, .ry = ry, .color = color } }) catch unreachable;
     }
 };
 

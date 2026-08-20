@@ -33,28 +33,32 @@ pub fn measure(tree: *node.Tree, d: widget.Button, c: layout.Constraints) geo.Si
     });
 }
 
-/// 绘制按钮：按状态选 token（L9）。
+/// 绘制按钮：焦点光环 → 圆角背景/边框（按状态选 token，L9）。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Button) void {
     const th = tree.theme_ref;
     const state = stateOf(tree, n);
 
+    // 焦点光环（外扩 ring，键盘 Tab 聚焦；disabled 不显示）。
+    if (tree.focus == n and state != .disabled) {
+        pc.strokeRect(n.rect.outset(geo.Edges.all(1)), th.focus_ring, 2, th.radius.small + 1);
+    }
+
     // 背景与边框（按状态取 token）。
     const bg: theme.Color = switch (state) {
-        .disabled => th.bg_surface,
+        .disabled => th.bg_disabled,
         .pressed => th.bg_pressed,
         .hover => th.bg_hover,
         .normal => th.bg_surface,
     };
-    const border: theme.Color = if (tree.focus == n) th.accent else switch (state) {
+    const border: theme.Color = switch (state) {
         .disabled => th.border,
         .normal => th.border,
         else => th.accent,
     };
-    const border_w: f32 = if (tree.focus == n) 2 else 1;
-    const fg: theme.Color = if (state == .disabled) th.text_weak else th.text;
+    const fg: theme.Color = if (state == .disabled) th.text_disabled else th.text;
 
-    pc.fillRect(n.rect, bg);
-    pc.strokeRect(n.rect, border, border_w, th.radius.small);
+    pc.fillRoundedRect(n.rect, th.radius.small, bg);
+    pc.strokeRect(n.rect, border, 1, th.radius.small);
 
     // 文本居中。
     if (tree.text_system) |ts| {
@@ -115,21 +119,21 @@ test "button paint uses hover token (MockPainter)" {
     var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
     defer mp.destroy();
 
-    // 先 normal 绘制：首条 fillRect 应为 bg_surface。
+    // 先 normal 绘制：首条 fillRoundedRect 应为 bg_surface。
     paint(&t, mp.ctx, n, n.widget.button);
     try std.testing.expect(mp.calls.items.len >= 1);
-    try std.testing.expect(mp.calls.items[0] == .fillRect);
+    try std.testing.expect(mp.calls.items[0] == .fillRoundedRect);
 
     mp.reset();
-    // hover 状态：fillRect 用 bg_hover。
+    // hover 状态：fillRoundedRect 用 bg_hover。
     t.hover = n;
     paint(&t, mp.ctx, n, n.widget.button);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_hover.r);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.g == theme.light.bg_hover.g);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_hover.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.g == theme.light.bg_hover.g);
 
     mp.reset();
     // pressed：bg_pressed。
     t.active = n;
     paint(&t, mp.ctx, n, n.widget.button);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_pressed.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_pressed.r);
 }

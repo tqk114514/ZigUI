@@ -15,6 +15,9 @@ const theme = @import("../theme.zig");
 const device_mod = @import("device.zig");
 const text_mod = @import("text.zig");
 
+/// 折线最大点数（帧路径栈上缓冲上限，L4 零分配）。
+const MAX_POLY_PTS: usize = 32;
+
 /// D2D 实现的 PaintCtx：持 device 引用，vtable 固定。
 pub const D2DPainter = struct {
     /// 渲染设备引用（持有 target 与缓存）。
@@ -33,6 +36,10 @@ pub const D2DPainter = struct {
         .pushClip = implPushClip,
         .popClip = implPopClip,
         .clipIntersects = implClipIntersects,
+        .fillRoundedRect = implFillRoundedRect,
+        .strokeLine = implStrokeLine,
+        .strokePolyline = implStrokePolyline,
+        .fillEllipse = implFillEllipse,
     };
 
     pub fn ctx(self: *D2DPainter, th: *const theme.Theme) painter.PaintCtx {
@@ -78,6 +85,70 @@ pub const D2DPainter = struct {
                     null,
                 );
             }
+        }
+    }
+
+    fn implFillRoundedRect(impl: *anyopaque, rect: geometry.Rect, radius: f32, color: theme.Color) void {
+        const self = selfOf(impl);
+        if (brushFor(self, color)) |b| {
+            const rr = d2d.D2D1_ROUNDED_RECT{
+                .rect = toD2DRect(rect),
+                .radiusX = radius,
+                .radiusY = radius,
+            };
+            self.device.rt.?.ID2D1RenderTarget.FillRoundedRectangle(&rr, brushCast(b));
+        }
+    }
+
+    fn implStrokeLine(impl: *anyopaque, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: theme.Color) void {
+        const pts = [_]geometry.Point{ .{ .x = x0, .y = y0 }, .{ .x = x1, .y = y1 } };
+        implStrokePolyline(impl, &pts, width, color);
+    }
+
+    fn implStrokePolyline(impl: *anyopaque, points: []const geometry.Point, width: f32, color: theme.Color) void {
+        const self = selfOf(impl);
+        if (brushFor(self, color)) |b| {
+            if (points.len < 2) return;
+            const dev = self.device;
+            // 取（或惰性创建）复用的 path geometry：单对象缓存复用（§5.6 禁止每帧建对象）。
+            // 走 DrawGeometry 而非 DrawLine：Zig 0.16 x64 对 DrawLine 两个连续 by-value
+            // D2D_POINT_2F 的传参 codegen 段错误（DrawTextLayout 单点正常），绕开之。
+            const geo = dev.path_geometry orelse blk: {
+                var g: *d2d.ID2D1PathGeometry = undefined;
+                if (dev.d2d_factory.CreatePathGeometry(&g).failed) return;
+                dev.path_geometry = g;
+                break :blk g;
+            };
+            var sink: *d2d.ID2D1GeometrySink = undefined;
+            if (geo.Open(&sink).failed) return;
+            defer _ = sink.IUnknown.Release();
+            const s = sink.ID2D1SimplifiedGeometrySink;
+            s.BeginFigure(.{ .x = points[0].x, .y = points[0].y }, .HOLLOW);
+            // 显式拷贝为 extern D2D_POINT_2F：不把普通 struct（geometry.Point）指针
+            // @ptrCast 重解释给 D2D（普通 struct 布局不受保证），规避 ABI/布局问题。
+            // 折线长度有界（勾号/图标 ≤ 数十点），栈上固定缓冲，帧路径零分配（L4）。
+            var d2d_pts: [MAX_POLY_PTS]d2d.common.D2D_POINT_2F = undefined;
+            const n = @min(points.len, MAX_POLY_PTS);
+            var i: usize = 1;
+            while (i < n) : (i += 1) {
+                d2d_pts[i - 1] = .{ .x = points[i].x, .y = points[i].y };
+            }
+            s.AddLines(&d2d_pts, @intCast(n - 1));
+            s.EndFigure(.OPEN);
+            _ = s.Close();
+            dev.rt.?.ID2D1RenderTarget.DrawGeometry(&geo.ID2D1Geometry, brushCast(b), width, null);
+        }
+    }
+
+    fn implFillEllipse(impl: *anyopaque, center: geometry.Point, rx: f32, ry: f32, color: theme.Color) void {
+        const self = selfOf(impl);
+        if (brushFor(self, color)) |b| {
+            const e = d2d.D2D1_ELLIPSE{
+                .point = .{ .x = center.x, .y = center.y },
+                .radiusX = rx,
+                .radiusY = ry,
+            };
+            self.device.rt.?.ID2D1RenderTarget.FillEllipse(&e, brushCast(b));
         }
     }
 

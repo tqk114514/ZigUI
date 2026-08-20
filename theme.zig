@@ -81,9 +81,27 @@ pub const Theme = struct {
     // 危险
     danger: Color,
 
+    // M7 视觉系统（§5.2）语义态
+    /// 键盘焦点光环（外圈 ring，区别于 hover；alpha 半透明）。
+    focus_ring: Color,
+    /// 禁用控件文本色。
+    text_disabled: Color,
+    /// 禁用控件背景色。
+    bg_disabled: Color,
+    /// accent 填充态的 hover 变体（勾选框/主按钮）。
+    accent_hover: Color,
+    /// accent 填充态的 pressed 变体。
+    accent_pressed: Color,
+
     // 字体槽位
     font_ui: Font,
     font_mono: Font,
+    /// 排版层级：标题（展示页/分区头用）。
+    font_title: Font,
+    /// 排版层级：说明/小字。
+    font_caption: Font,
+    /// 图标字形（标题栏最小化/最大化/关闭，§5.9；Segoe MDL2 Assets 系统字体）。
+    font_icons: Font,
 
     // 几何
     radius: Radius,
@@ -104,8 +122,16 @@ pub const light = Theme{
     .accent = Color.rgb(0.24, 0.45, 0.85),
     .accent_text = Color.rgb(1.00, 1.00, 1.00),
     .danger = Color.rgb(0.80, 0.20, 0.20),
+    .focus_ring = Color.rgba(0.24, 0.45, 0.85, 0.50),
+    .text_disabled = Color.rgb(0.62, 0.62, 0.65),
+    .bg_disabled = Color.rgb(0.93, 0.93, 0.94),
+    .accent_hover = Color.rgb(0.18, 0.36, 0.72),
+    .accent_pressed = Color.rgb(0.12, 0.27, 0.58),
     .font_ui = .{ .family = "Microsoft YaHei UI", .size = 13.0 },
     .font_mono = .{ .family = "Consolas", .size = 13.0 },
+    .font_title = .{ .family = "Microsoft YaHei UI", .size = 18.0, .weight = .semibold },
+    .font_caption = .{ .family = "Microsoft YaHei UI", .size = 11.0 },
+    .font_icons = .{ .family = "Segoe MDL2 Assets", .size = 10.0 },
     .radius = .{},
     .spacing = .{},
 };
@@ -124,8 +150,16 @@ pub const dark = Theme{
     .accent = Color.rgb(0.30, 0.52, 0.92),
     .accent_text = Color.rgb(0.06, 0.06, 0.07),
     .danger = Color.rgb(0.85, 0.40, 0.40),
+    .focus_ring = Color.rgba(0.30, 0.52, 0.92, 0.50),
+    .text_disabled = Color.rgb(0.45, 0.45, 0.48),
+    .bg_disabled = Color.rgb(0.13, 0.13, 0.15),
+    .accent_hover = Color.rgb(0.40, 0.62, 1.00),
+    .accent_pressed = Color.rgb(0.22, 0.43, 0.82),
     .font_ui = .{ .family = "Microsoft YaHei UI", .size = 13.0 },
     .font_mono = .{ .family = "Consolas", .size = 13.0 },
+    .font_title = .{ .family = "Microsoft YaHei UI", .size = 18.0, .weight = .semibold },
+    .font_caption = .{ .family = "Microsoft YaHei UI", .size = 11.0 },
+    .font_icons = .{ .family = "Segoe MDL2 Assets", .size = 10.0 },
     .radius = .{},
     .spacing = .{},
 };

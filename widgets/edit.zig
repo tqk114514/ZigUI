@@ -57,8 +57,12 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ed
     const focus = tree.focus == n;
     const hover = tree.hover == n;
 
-    // 背景：悬停取 bg_hover（类似 checkbox，§6）；聚焦边框 accent。
-    pc.fillRect(n.rect, if (hover) th.bg_hover else th.bg_surface);
+    // 焦点光环（外扩 ring，键盘 Tab 聚焦）。
+    if (focus) {
+        pc.strokeRect(n.rect.outset(geo.Edges.all(1)), th.focus_ring, 2, th.radius.small + 1);
+    }
+    // 背景：悬停取 bg_hover；聚焦边框仍 accent（细边框 + 外环，不再加粗）。
+    pc.fillRoundedRect(n.rect, th.radius.small, if (hover) th.bg_hover else th.bg_surface);
     pc.strokeRect(n.rect, if (focus) th.accent else th.border, 1, th.radius.small);
 
     const ts = tree.text_system orelse return;
@@ -699,13 +703,13 @@ test "edit: hover uses bg_hover on background (MockPainter)" {
     var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
     defer mp.destroy();
 
-    // 无 hover：背景 bg_surface。
+    // 无 hover：背景 bg_surface（fillRoundedRect）。
     paint(&t, mp.ctx, n, n.widget.edit);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_surface.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_surface.r);
 
     // hover：背景 bg_hover。
     mp.reset();
     t.hover = n;
     paint(&t, mp.ctx, n, n.widget.edit);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_hover.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_hover.r);
 }

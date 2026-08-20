@@ -36,25 +36,26 @@ pub fn measure(tree: *node.Tree, d: widget.Slider, c: layout.Constraints) geo.Si
     return c.constrain(.{ .width = w, .height = ctrl_h });
 }
 
-/// 绘制：轨道（底色）→ 已滑部分（accent）→ 滑块。hover/拖动时滑块灰色遮罩（bg_hover）。
+/// 绘制：轨道（圆角底色）→ 已滑段（accent）→ 圆形拇指。hover/拖动时拇指灰色遮罩（bg_hover）。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Slider) void {
     const th = tree.theme_ref;
     const hover = tree.hover == n;
     const cy = n.rect.y + n.rect.h * 0.5;
     const frac = valueFraction(d);
+    const radius = track_h * 0.5;
     const track = geo.Rect{ .x = n.rect.x, .y = cy - track_h * 0.5, .w = n.rect.w, .h = track_h };
-    pc.fillRect(track, th.bg_pressed);
+    pc.fillRoundedRect(track, radius, th.bg_pressed);
     if (frac > 0) {
-        pc.fillRect(.{ .x = track.x, .y = track.y, .w = track.w * frac, .h = track.h }, th.accent);
+        pc.fillRoundedRect(.{ .x = track.x, .y = track.y, .w = track.w * frac, .h = track.h }, radius, th.accent);
     }
-    const thumb = geo.Rect{
-        .x = track.x + (track.w - thumb_size) * frac,
-        .y = cy - thumb_size * 0.5,
-        .w = thumb_size,
-        .h = thumb_size,
-    };
-    // hover/拖动：灰色遮罩（bg_hover，类似 checkbox hover，§6）；常态 accent。
-    pc.fillRect(thumb, if (hover or d.dragging) th.bg_hover else th.accent);
+    // 圆形拇指：中心跟随指针（行程 = 轨道宽 − 滑块宽，§6 与 setValueFromX 一致）。
+    const thumb_cx = track.x + (track.w - thumb_size) * frac + thumb_size * 0.5;
+    pc.fillEllipse(
+        .{ .x = thumb_cx, .y = cy },
+        thumb_size * 0.5,
+        thumb_size * 0.5,
+        if (hover or d.dragging) th.bg_hover else th.accent,
+    );
 }
 
 /// value 在 [min,max] 中的归一化比例 [0,1]。
@@ -163,19 +164,19 @@ test "slider: hover shows gray mask on thumb (MockPainter)" {
 
     var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
     defer mp.destroy();
-    // value=50 → 3 个 fillRect：轨道、已滑段、滑块。
+    // value=50 → 轨道 fillRoundedRect、已滑段 fillRoundedRect、拇指 fillEllipse。
 
-    // 无 hover：轨道 bg_pressed，滑块 accent，无描边。
+    // 无 hover：轨道 bg_pressed，拇指 accent。
     paint(&t, mp.ctx, n, n.widget.slider);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_pressed.r);
-    try std.testing.expect(mp.calls.items[2].fillRect.color.r == theme.light.accent.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_pressed.r);
+    try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.accent.r);
 
-    // hover：滑块灰色遮罩（bg_hover），轨道不变，无描边。
+    // hover：拇指灰色遮罩（bg_hover），轨道不变，无描边。
     mp.reset();
     t.hover = n;
     paint(&t, mp.ctx, n, n.widget.slider);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_pressed.r);
-    try std.testing.expect(mp.calls.items[2].fillRect.color.r == theme.light.bg_hover.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_pressed.r);
+    try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.bg_hover.r);
     var strokes: usize = 0;
     for (mp.calls.items) |c| {
         if (c == .strokeRect) strokes += 1;

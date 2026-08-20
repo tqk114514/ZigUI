@@ -37,6 +37,8 @@ pub const Device = struct {
     brush_cache: cache.BrushCache,
     /// DWrite 文本系统（TextFormat + TextLayout 缓存，§5.7）。
     text_system: text.TextSystemImpl,
+    /// 折线绘制用 path geometry（strokePolyline 复用，惰性创建；§5.6 禁止每帧建对象）。
+    path_geometry: ?*d2d.ID2D1PathGeometry = null,
 
     /// 创建设备。失败返回错误（可失败边界，§4.2）。
     pub fn init(allocator: std.mem.Allocator, hwnd: win32.HWND) !*Device {
@@ -194,6 +196,7 @@ pub const Device = struct {
         // brush_cache.deinit() 内部已 reset 释放全部 brush 并 deinit map；
         // rt 在此直接释放，避免重复 reset 已释放的 map（incorrect alignment）。
         if (self.rt) |rt| _ = rt.IUnknown.Release();
+        if (self.path_geometry) |g| _ = g.IUnknown.Release();
         self.brush_cache.deinit();
         _ = self.dwrite_factory.IUnknown.Release();
         _ = self.d2d_factory.IUnknown.Release();

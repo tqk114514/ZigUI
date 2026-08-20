@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const w32 = @import("win32.zig");
 const node = @import("../core/node.zig");
 const geometry = @import("../core/geometry.zig");
+const painter = @import("../core/painter.zig");
 const event = @import("../core/event.zig");
 const widget = @import("../core/widget.zig");
 const dispatch = @import("../widgets/dispatch.zig");
@@ -32,6 +33,16 @@ const log = std.log.scoped(.platform);
 
 /// 消息泵返回值。目前仅"窗口已关闭"一种退出路径。
 pub const RunResult = enum { closed };
+
+/// 自定义标题栏高度（DIP）。
+const TITLEBAR_H: f32 = 32;
+/// 标题栏按钮宽度（DIP）。
+const TITLE_BTN_W: f32 = 46;
+/// 按钮索引。
+const BTN_MIN: u8 = 0;
+const BTN_MAX: u8 = 1;
+const BTN_CLOSE: u8 = 2;
+const BTN_NONE: i8 = -1;
 
 /// 平台选项。
 pub const Options = struct {
@@ -53,6 +64,8 @@ pub const Options = struct {
     /// 每帧绘制完成后回调（UI 线程）。供 profiling / bench（§4.9）统计帧耗时。
     frame_hook: ?*const fn (user_ctx: ?*anyopaque) void = null,
     frame_hook_ctx: ?*anyopaque = null,
+    /// 是否使用自定义标题栏（§5.9：DWM 圆角 + 自绘顶栏）。默认 true。
+    use_titlebar: bool = true,
 };
 
 /// 每窗口的上下文，经 GWLP_USERDATA 挂到 HWND，wndProc 取回。
@@ -79,6 +92,16 @@ const WindowCtx = struct {
     caret_bmp: ?w32.gdi.HBITMAP = null,
     /// WM_CHAR 代理对暂存（emoji 等，§5.9：WM_CHAR 是 text_input 唯一来源）。
     surrogate_high: u16 = 0,
+    /// 窗口标题（UTF-8，run 时一次性转换；标题栏绘制用，帧路径零分配）。
+    title_utf8: []const u8 = "",
+    /// 标题栏启用（§5.9 use_titlebar）。
+    titlebar_active: bool = false,
+    /// 标题栏按钮悬停索引（BTN_MIN/MAX/CLOSE，BTN_NONE = 无）。
+    tb_hover: i8 = BTN_NONE,
+    /// 标题栏按钮按下索引（拖动中记原始按钮，BTN_NONE = 无）。
+    tb_pressed: i8 = BTN_NONE,
+    /// 最大化后首帧需要按最大化处理裁剪/布局（maximize 尺寸与 restore 不同）。
+    maximize_dirty: bool = false,
 };
 
 /// 光标闪烁定时器 ID（§5.8：WM_TIMER 530ms，仅 focus 时启动）。
@@ -171,6 +194,10 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         std.heap.page_allocator.destroy(bridge);
     }
 
+    // 标题栏标题 UTF-8（绘制用；一次性转换，帧路径零分配）。
+    const title_utf8 = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, opts.title) catch "";
+    defer std.heap.page_allocator.free(title_utf8);
+
     // 6. 挂载 ctx（让 WM_PAINT 等消息能找到窗口状态）。
     var ctx = WindowCtx{
         .hwnd = hwnd,
@@ -184,9 +211,18 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .frame_hook = opts.frame_hook,
         .frame_hook_ctx = opts.frame_hook_ctx,
         .ime = .{ .hwnd = hwnd },
+        .title_utf8 = title_utf8,
+        .titlebar_active = opts.use_titlebar,
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
     defer _ = w32.user32.DestroyWindow(hwnd);
+
+    // 4b. 自定义标题栏（§5.9）：DWM 扩展帧进客户区（保留阴影/圆角）+ Win11 圆角偏好。
+    // 必须在 ctx 挂载之后：WM_NCCALCSIZE（FRAMECHANGED 触发）依赖 ctx 判断"是否启用"，
+    // 否则移除标准标题栏的 NCCALCSIZE 落空，系统标题栏残留到下次 resize/minimize。
+    if (opts.use_titlebar) {
+        applyTitlebarFrame(hwnd);
+    }
 
     // 7. 先渲染首帧再显示：否则窗口先以默认白色客户区呈现一瞬（启动白屏闪烁）。
     //    显示后 WM_PAINT 会再正常重绘一帧，内容一致。
@@ -221,6 +257,161 @@ fn setDarkTitleBar(hwnd: w32.HWND) void {
     );
 }
 
+/// 自定义标题栏帧（§5.9）：DWM 扩展帧进客户区（保留阴影）+ Win11 圆角偏好，
+/// 并强制 WM_NCCALCSIZE 应用（移除标准标题栏）。
+fn applyTitlebarFrame(hwnd: w32.HWND) void {
+    const margins = w32.controls.MARGINS{ .cxLeftWidth = 0, .cxRightWidth = 0, .cyTopHeight = 0, .cyBottomHeight = 0 };
+    _ = w32.dwmapi.DwmExtendFrameIntoClientArea(hwnd, &margins);
+    const corner: w32.dwm.DWM_WINDOW_CORNER_PREFERENCE = .ROUND;
+    _ = w32.dwmapi.DwmSetWindowAttribute(
+        hwnd,
+        w32.dwm.DWMWINDOWATTRIBUTE.WINDOW_CORNER_PREFERENCE,
+        &corner,
+        @sizeOf(w32.dwm.DWM_WINDOW_CORNER_PREFERENCE),
+    );
+    // 立即应用 WM_NCCALCSIZE（移除标准标题栏），避免首帧残留系统标题栏。
+    _ = w32.user32.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        .{ .NOMOVE = 1, .NOSIZE = 1, .NOZORDER = 1, .NOACTIVATE = 1, .DRAWFRAME = 1 },
+    );
+}
+
+/// 标题栏按钮矩形（DIP，客户区坐标）。索引 BTN_MIN/MAX/CLOSE。
+fn titlebarButtonRect(ctx: *const WindowCtx, index: u8) geometry.Rect {
+    const width = getClientSizeDips(ctx.device.?).width;
+    const x = width - @as(f32, @floatFromInt(3 - index)) * TITLE_BTN_W;
+    return .{ .x = x, .y = 0, .w = TITLE_BTN_W, .h = TITLEBAR_H };
+}
+
+/// 客户区 DIP 坐标命中哪个标题栏按钮（BTN_NONE = 无）。
+fn titlebarHitButton(ctx: *const WindowCtx, p: geometry.Point) i8 {
+    if (p.y < 0 or p.y >= TITLEBAR_H) return BTN_NONE;
+    var i: u8 = BTN_MIN;
+    while (i <= BTN_CLOSE) : (i += 1) {
+        if (titlebarButtonRect(ctx, i).contains(p)) return @intCast(i);
+    }
+    return BTN_NONE;
+}
+
+/// 绘制标题栏（§5.9）：背景（bg_window，与内容区一体）→ 底部 1px 分隔线 →
+/// 标题文本（左，font_ui）→ 三按钮（hover/pressed 视觉 + line 图标）。
+fn paintTitlebar(ctx: *WindowCtx, pc: painter.PaintCtx) void {
+    const th = ctx.theme_ref;
+    const w = getClientSizeDips(ctx.device.?).width;
+    const strip = geometry.Rect{ .x = 0, .y = 0, .w = w, .h = TITLEBAR_H };
+    // 背景与分隔线（L9：只取 theme token）。
+    pc.fillRect(strip, th.bg_window);
+    pc.fillRect(.{ .x = 0, .y = TITLEBAR_H - 1, .w = w, .h = 1 }, th.border);
+
+    // 标题文本（左，垂直居中；前导 12 DIP 呼吸间距）。
+    if (ctx.title_utf8.len > 0) {
+        if (ctx.tree.text_system) |ts| {
+            if (ts.layout(ctx.title_utf8, &th.font_ui, w - 4 * TITLE_BTN_W, .{})) |tl| {
+                const ty = (TITLEBAR_H - tl.bounds.height) * 0.5;
+                pc.drawText(.{ .x = 12, .y = ty, .w = tl.bounds.width, .h = tl.bounds.height }, tl, th.text);
+            }
+        }
+    }
+
+    // 三按钮：最小化 / 最大化恢复 / 关闭（字形图标，Segoe MDL2 Assets，§5.9）。
+    const icon_font = th.font_icons;
+    var i: u8 = BTN_MIN;
+    while (i <= BTN_CLOSE) : (i += 1) {
+        const r = titlebarButtonRect(ctx, i);
+        const hovered = ctx.tb_hover == @as(i8, @intCast(i));
+        const pressed = ctx.tb_pressed == @as(i8, @intCast(i));
+        // 关闭键 hover/pressed 用 danger（Win11 风格）；其余用 hover/pressed token。
+        const bg: theme.Color = if (i == BTN_CLOSE and (hovered or pressed))
+            th.danger
+        else if (pressed)
+            th.bg_pressed
+        else if (hovered)
+            th.bg_hover
+        else
+            th.bg_window;
+        pc.fillRect(r, bg);
+        // 关闭键红底时图标用 accent_text（保证对比度），其余用正文色（L9）。
+        const icon_color: theme.Color = if (i == BTN_CLOSE and (hovered or pressed)) th.accent_text else th.text;
+        // 字形图标：U+E921 最小化、U+E922 最大化、U+E923 恢复、U+E8BB 关闭。
+        const icon_cp = switch (i) {
+            BTN_MIN => "\u{E921}",
+            BTN_MAX => if (isZoomed(ctx.hwnd)) "\u{E923}" else "\u{E922}",
+            BTN_CLOSE => "\u{E8BB}",
+            else => unreachable,
+        };
+        if (ctx.tree.text_system) |ts| {
+            if (ts.layout(icon_cp, &icon_font, r.w, .{})) |tl| {
+                const ix = r.x + (r.w - tl.bounds.width) * 0.5;
+                const iy = r.y + (r.h - tl.bounds.height) * 0.5;
+                pc.drawText(.{ .x = ix, .y = iy, .w = tl.bounds.width, .h = tl.bounds.height }, tl, icon_color);
+            }
+        }
+    }
+}
+
+/// 边框厚度（物理像素）：非客户区 resize 边。用 per-DPI 系统度量。
+fn frameBorderPx(scale: f32) i32 {
+    const dpi: u32 = @intFromFloat(scale * 96.0);
+    return w32.user32.GetSystemMetricsForDpi(w32.windows_and_messaging.SM_CXSIZEFRAME, dpi) +
+        w32.user32.GetSystemMetricsForDpi(w32.windows_and_messaging.SM_CXPADDEDBORDER, dpi);
+}
+
+/// 当前是否最大化。
+fn isZoomed(hwnd: w32.HWND) bool {
+    return w32.user32.IsZoomed(hwnd) != 0;
+}
+
+/// 执行标题栏按钮动作（§5.9）。index = BTN_MIN/MAX/CLOSE。
+fn titlebarAction(ctx: *WindowCtx, index: u8) void {
+    switch (index) {
+        BTN_MIN => _ = w32.user32.ShowWindow(ctx.hwnd, w32.windows_and_messaging.SW_MINIMIZE),
+        BTN_MAX => {
+            const cmd: w32.windows_and_messaging.SHOW_WINDOW_CMD = if (isZoomed(ctx.hwnd))
+                w32.windows_and_messaging.SW_RESTORE
+            else
+                w32.windows_and_messaging.SW_MAXIMIZE;
+            _ = w32.user32.ShowWindow(ctx.hwnd, cmd);
+            // 最大化/恢复会触发 WM_SIZE（刷新布局）；最大化首帧 WM_SIZE 可能先于
+            // IsZoomed 生效，标记下一帧按最大化尺寸裁剪。
+            ctx.maximize_dirty = true;
+            _ = w32.user32.InvalidateRect(ctx.hwnd, null, 0);
+        },
+        BTN_CLOSE => _ = w32.user32.DestroyWindow(ctx.hwnd),
+        else => {},
+    }
+}
+
+/// 从 WM_MOUSE 的 lParam 提取客户区 DIP 坐标（§5.9）。
+fn clientPointDip(l_param: w32.LPARAM, scale: f32) geometry.Point {
+    const raw: i64 = @bitCast(l_param);
+    const px_x: i16 = @truncate(raw);
+    const px_y: i16 = @truncate(raw >> 16);
+    return .{ .x = @as(f32, @floatFromInt(px_x)) / scale, .y = @as(f32, @floatFromInt(px_y)) / scale };
+}
+
+/// 显示系统菜单（§5.9：标题栏右键）。
+fn showSystemMenu(ctx: *WindowCtx, sx: i16, sy: i16) void {
+    const menu = w32.user32.GetSystemMenu(ctx.hwnd, 0);
+    if (menu) |m| {
+        _ = w32.user32.SetForegroundWindow(ctx.hwnd);
+        const cmd = w32.user32.TrackPopupMenu(
+            m,
+            .{ .RIGHTBUTTON = 1, .RETURNCMD = 1 },
+            sx,
+            sy,
+            0,
+            ctx.hwnd,
+            null,
+        );
+        if (cmd != 0) _ = w32.user32.PostMessageW(ctx.hwnd, w32.windows_and_messaging.WM_SYSCOMMAND, @intCast(cmd), 0);
+    }
+}
+
 /// 执行一帧绘制（WM_PAINT 与首帧共用）。
 fn renderFrame(ctx: *WindowCtx) void {
     const dev = ctx.device.?;
@@ -228,21 +419,30 @@ fn renderFrame(ctx: *WindowCtx) void {
     if (!dev.ensureTarget()) return;
     const client = getClientSizeDips(dev);
 
-    // 惰性布局：绘制前必须调用（§5.3）。
+    // 惰性布局：绘制前必须调用（§5.3）。自定义标题栏时内容区从标题栏下方开始。
+    ctx.tree.content_top = if (ctx.titlebar_active) TITLEBAR_H else 0;
     ctx.tree.ensureLayout(client);
 
     const pc = ctx.painter.ctx(ctx.theme_ref);
     dev.beginFrame();
     // 清背景（窗口 token）。
     dev.rt.?.ID2D1RenderTarget.Clear(&toD2DColor(ctx.theme_ref.bg_window));
+    // 标题栏（§5.9）：先于内容绘制，一体视觉。
+    if (ctx.titlebar_active) paintTitlebar(ctx, pc);
     ctx.tree.paint(pc);
     const need_retry = dev.endFrame();
     if (need_retry) {
         // 设备丢失：endFrame 已重建 render target，重绘一次。
         dev.beginFrame();
         dev.rt.?.ID2D1RenderTarget.Clear(&toD2DColor(ctx.theme_ref.bg_window));
+        if (ctx.titlebar_active) paintTitlebar(ctx, pc);
         ctx.tree.paint(pc);
         _ = dev.endFrame();
+    }
+    // 最大化/恢复切换：首帧后 IsZoomed 才稳定，强制再重绘一次（按钮图标跟随）。
+    if (ctx.maximize_dirty and ctx.titlebar_active) {
+        ctx.maximize_dirty = false;
+        _ = w32.user32.InvalidateRect(ctx.hwnd, null, 0);
     }
     // 帧钩子（§4.9）：本帧绘制完成，供 bench 统计帧耗时。
     if (ctx.frame_hook) |f| f(ctx.frame_hook_ctx);
@@ -342,6 +542,116 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
             w32.user32.PostQuitMessage(0);
             return 0;
         },
+        // —— 自定义标题栏（§5.9）：NC 消息（仅启用时拦截）——
+        w32.windows_and_messaging.WM_NCCALCSIZE => {
+            if (ctx != null and ctx.?.titlebar_active) {
+                if (w_param != 0) {
+                    const params: *w32.windows_and_messaging.NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(l_param)));
+                    // 最大化：客户区 = 工作区（补偿系统边框溢出；标准 custom chrome）。
+                    if (isZoomed(hwnd)) {
+                        const mon = w32.user32.MonitorFromWindow(hwnd, w32.gdi.MONITOR_DEFAULTTONEAREST);
+                        var mi: w32.gdi.MONITORINFO = undefined;
+                        mi.cbSize = @sizeOf(w32.gdi.MONITORINFO);
+                        if (w32.user32.GetMonitorInfoW(mon, &mi) != 0) {
+                            params.rgrc[0] = mi.rcWork;
+                        }
+                    }
+                    // 返回 0：移除标准标题栏。
+                    return 0;
+                }
+            }
+        },
+        w32.windows_and_messaging.WM_GETMINMAXINFO => {
+            if (ctx != null and ctx.?.titlebar_active) {
+                const mm: *w32.windows_and_messaging.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(l_param)));
+                // 最大化填满工作区（不遮任务栏）。
+                const mon = w32.user32.MonitorFromWindow(hwnd, w32.gdi.MONITOR_DEFAULTTONEAREST);
+                var mi: w32.gdi.MONITORINFO = undefined;
+                mi.cbSize = @sizeOf(w32.gdi.MONITORINFO);
+                if (w32.user32.GetMonitorInfoW(mon, &mi) != 0) {
+                    mm.ptMaxPosition = .{ .x = mi.rcWork.left, .y = mi.rcWork.top };
+                    mm.ptMaxSize = .{ .x = mi.rcWork.right - mi.rcWork.left, .y = mi.rcWork.bottom - mi.rcWork.top };
+                    mm.ptMaxTrackSize = mm.ptMaxSize;
+                }
+                return 0;
+            }
+        },
+        w32.windows_and_messaging.WM_NCHITTEST => {
+            if (ctx != null and ctx.?.titlebar_active) {
+                const raw: i64 = @bitCast(l_param);
+                const sx: i16 = @truncate(raw);
+                const sy: i16 = @truncate(raw >> 16);
+                const scale = ctx.?.device.?.dpi_scale;
+                // 非最大化：四边/四角 resize（用 per-DPI 系统边框厚）。
+                if (!isZoomed(hwnd)) {
+                    const border = frameBorderPx(scale);
+                    var wrc: w32.RECT = undefined;
+                    if (w32.user32.GetWindowRect(hwnd, &wrc) != 0) {
+                        const on_l = sx < wrc.left + border;
+                        const on_r = sx > wrc.right - border;
+                        const on_t = sy < wrc.top + border;
+                        const on_b = sy > wrc.bottom - border;
+                        if (on_t and on_l) return w32.windows_and_messaging.HTTOPLEFT;
+                        if (on_t and on_r) return w32.windows_and_messaging.HTTOPRIGHT;
+                        if (on_b and on_l) return w32.windows_and_messaging.HTBOTTOMLEFT;
+                        if (on_b and on_r) return w32.windows_and_messaging.HTBOTTOMRIGHT;
+                        if (on_l) return w32.windows_and_messaging.HTLEFT;
+                        if (on_r) return w32.windows_and_messaging.HTRIGHT;
+                        if (on_t) return w32.windows_and_messaging.HTTOP;
+                        if (on_b) return w32.windows_and_messaging.HTBOTTOM;
+                    }
+                }
+                // 标题栏：最大化按钮返回 HTMAXBUTTON（Win11 悬停出 Snap Layouts、点击系统
+                // 最大化，§5.9），其余按钮 HTCLIENT（应用自绘响应），拖拽区 HTCAPTION。
+                var pt = w32.foundation.POINT{ .x = sx, .y = sy };
+                if (w32.user32.ScreenToClient(hwnd, &pt) != 0) {
+                    const p = geometry.Point{ .x = @as(f32, @floatFromInt(pt.x)) / scale, .y = @as(f32, @floatFromInt(pt.y)) / scale };
+                    if (p.y < TITLEBAR_H) {
+                        const btn = titlebarHitButton(ctx.?, p);
+                        if (btn == BTN_MAX) return w32.windows_and_messaging.HTMAXBUTTON;
+                        if (btn != BTN_NONE) return w32.windows_and_messaging.HTCLIENT;
+                        return w32.windows_and_messaging.HTCAPTION;
+                    }
+                }
+                return w32.windows_and_messaging.HTCLIENT;
+            }
+        },
+        w32.windows_and_messaging.WM_NCRBUTTONUP => {
+            // 标题栏右键：系统菜单（标准行为，§5.9）。
+            if (ctx != null and ctx.?.titlebar_active and w_param == w32.windows_and_messaging.HTCAPTION) {
+                const raw: i64 = @bitCast(l_param);
+                const sx: i16 = @truncate(raw);
+                const sy: i16 = @truncate(raw >> 16);
+                showSystemMenu(ctx.?, sx, sy);
+                return 0;
+            }
+        },
+        // —— 最大化按钮的 NC 状态（HTMAXBUTTON，§5.9）：跟踪 hover/press 视觉，
+        //    系统行为（Snap Layouts 悬停触发 / 点击最大化）交给 DefWindowProc ——
+        w32.windows_and_messaging.WM_NCMOUSEMOVE => {
+            if (ctx != null and ctx.?.titlebar_active) {
+                const new_hover: i8 = if (w_param == w32.windows_and_messaging.HTMAXBUTTON) BTN_MAX else BTN_NONE;
+                if (new_hover != ctx.?.tb_hover) {
+                    ctx.?.tb_hover = new_hover;
+                    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                }
+            }
+            return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
+        },
+        w32.windows_and_messaging.WM_NCLBUTTONDOWN => {
+            if (ctx != null and ctx.?.titlebar_active and w_param == w32.windows_and_messaging.HTMAXBUTTON) {
+                ctx.?.tb_pressed = BTN_MAX;
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            }
+            return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
+        },
+        w32.windows_and_messaging.WM_NCLBUTTONUP => {
+            if (ctx != null and ctx.?.titlebar_active and ctx.?.tb_pressed != BTN_NONE) {
+                ctx.?.tb_pressed = BTN_NONE;
+                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            }
+            return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
+        },
         w32.windows_and_messaging.WM_SETFOCUS => {
             if (ctx != null) {
                 // 重新激活：启用输入法；若焦点是 Edit，恢复光标定时器/系统 caret。
@@ -413,6 +723,46 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_MBUTTONDBLCLK,
         => {
             if (ctx != null) {
+                // 标题栏按钮（§5.9）：先在顶栏命中逻辑中处理，命中按钮则不交给树。
+                if (ctx.?.titlebar_active) {
+                    const tb_scale = ctx.?.device.?.dpi_scale;
+                    const p = clientPointDip(l_param, tb_scale);
+                    const btn = titlebarHitButton(ctx.?, p);
+                    switch (u_msg) {
+                        w32.windows_and_messaging.WM_LBUTTONDOWN => {
+                            if (btn != BTN_NONE) {
+                                ctx.?.tb_pressed = btn;
+                                ctx.?.tb_hover = btn;
+                                _ = w32.user32.SetCapture(hwnd);
+                                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                                return 0;
+                            }
+                        },
+                        w32.windows_and_messaging.WM_LBUTTONUP => {
+                            if (ctx.?.tb_pressed != BTN_NONE) {
+                                if (btn == ctx.?.tb_pressed) titlebarAction(ctx.?, @intCast(btn));
+                                ctx.?.tb_pressed = BTN_NONE;
+                                ctx.?.tb_hover = BTN_NONE;
+                                _ = w32.user32.ReleaseCapture();
+                                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                                return 0;
+                            }
+                        },
+                        w32.windows_and_messaging.WM_MOUSEMOVE => {
+                            if (btn != ctx.?.tb_hover) {
+                                ctx.?.tb_hover = btn;
+                                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                            }
+                            // 拖动中（已捕获）：吞掉，避免树收到越界指针事件。
+                            if (ctx.?.tb_pressed != BTN_NONE) return 0;
+                        },
+                        w32.windows_and_messaging.WM_LBUTTONDBLCLK => {
+                            // 双击按钮 = 第二次点击；吞掉（首击已执行动作，防二次切换）。
+                            if (btn != BTN_NONE) return 0;
+                        },
+                        else => {},
+                    }
+                }
                 const scale = ctx.?.device.?.dpi_scale;
                 if (input_mod.pointerEvent(u_msg, l_param, scale)) |ev| {
                     var e = ev;

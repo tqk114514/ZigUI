@@ -41,7 +41,7 @@ pub fn measure(tree: *node.Tree, d: widget.Checkbox, c: layout.Constraints) geo.
     return c.constrain(.{ .width = w, .height = h });
 }
 
-/// 绘制：勾选框（状态决定填充/边框）+ 标签文本。
+/// 绘制：焦点光环 → 勾选框（状态决定填充/边框）→ 勾号 → 标签文本。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Checkbox) void {
     const th = tree.theme_ref;
     const focus = tree.focus == n;
@@ -52,13 +52,29 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ch
         .w = box_size,
         .h = box_size,
     };
-    // 勾选：accent 填充 + accent 边框；未勾选：surface 填充（悬停 bg_hover）+ border
-    // （聚焦时 accent）。
-    const bg = if (d.checked) th.accent else if (hover) th.bg_hover else th.bg_surface;
-    const border = if (d.checked) th.accent else if (focus) th.accent else th.border;
-    const border_w: f32 = if (d.checked or focus) 2 else 1;
-    pc.fillRect(box, bg);
-    pc.strokeRect(box, border, border_w, th.radius.small);
+    // 焦点光环（外扩 ring，键盘 Tab 聚焦；disabled 不显示）。
+    if (focus and !n.flags.disabled) {
+        pc.strokeRect(box.outset(geo.Edges.all(1)), th.focus_ring, 2, th.radius.small + 1);
+    }
+    // 勾选态：accent 填充（hover accent_hover）+ accent 边框；未勾选：surface（悬停 bg_hover）+ border。
+    const bg = if (d.checked)
+        (if (hover) th.accent_hover else th.accent)
+    else
+        (if (hover) th.bg_hover else th.bg_surface);
+    const border = if (d.checked or focus) th.accent else th.border;
+    pc.fillRoundedRect(box, th.radius.small, bg);
+    pc.strokeRect(box, border, 1, th.radius.small);
+
+    // 勾号：折线（M7 线原语）。坐标按 box 归一化，末端圆头。
+    if (d.checked) {
+        const s = box_size;
+        const pts = [_]geo.Point{
+            .{ .x = box.x + s * 0.22, .y = box.y + s * 0.52 },
+            .{ .x = box.x + s * 0.42, .y = box.y + s * 0.72 },
+            .{ .x = box.x + s * 0.78, .y = box.y + s * 0.30 },
+        };
+        pc.strokePolyline(&pts, 2.0, th.accent_text);
+    }
 
     if (d.label.len > 0) {
         if (tree.text_system) |ts| {
@@ -67,7 +83,7 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ch
                 pc.drawText(
                     .{ .x = box.x + box_size + label_gap, .y = n.rect.y, .w = lw, .h = n.rect.h },
                     tl,
-                    if (n.flags.disabled) th.text_weak else th.text,
+                    if (n.flags.disabled) th.text_disabled else th.text,
                 );
             }
         }
@@ -143,14 +159,20 @@ test "checkbox: paint checked uses accent fill (MockPainter)" {
     var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
     defer mp.destroy();
 
-    // 未勾选：首个 fillRect 用 surface。
+    // 未勾选：首个 fillRoundedRect 用 surface。
     paint(&t, mp.ctx, n, n.widget.checkbox);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_surface.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_surface.r);
 
     mp.reset();
     n.widget.checkbox.checked = true;
     paint(&t, mp.ctx, n, n.widget.checkbox);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.accent.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.accent.r);
+    // 勾选态画出勾号（strokePolyline）。
+    var polylines: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .strokePolyline) polylines += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), polylines);
 }
 
 test "checkbox: hover uses bg_hover on unchecked box (MockPainter)" {
@@ -168,11 +190,11 @@ test "checkbox: hover uses bg_hover on unchecked box (MockPainter)" {
 
     t.hover = n; // 悬停：未勾选框底取 bg_hover。
     paint(&t, mp.ctx, n, n.widget.checkbox);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_hover.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_hover.r);
 
     mp.reset();
-    // 勾选时 hover 不覆盖勾选态（保持 accent）。
+    // 勾选 + hover：填充取 accent_hover（accent 的 hover 变体）。
     n.widget.checkbox.checked = true;
     paint(&t, mp.ctx, n, n.widget.checkbox);
-    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.accent.r);
+    try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.accent_hover.r);
 }

@@ -16,8 +16,9 @@ const theme = @import("../theme.zig");
 /// 求文本固有尺寸：loosen 约束 → text_system.layout 取 bounds。
 pub fn measure(tree: *node.Tree, d: widget.Text, c: layout.Constraints) geo.Size {
     if (tree.text_system) |ts| {
+        const font = d.font orelse tree.theme_ref.font_ui;
         const opts = painter.TextLayoutOptions{ .wrap = d.wrap, .ellipsis = d.ellipsis };
-        if (ts.layout(d.text, &tree.theme_ref.font_ui, c.max.width, opts)) |tl| {
+        if (ts.layout(d.text, &font, c.max.width, opts)) |tl| {
             return .{ .width = tl.bounds.width, .height = tl.bounds.height };
         }
     }
@@ -28,10 +29,12 @@ pub fn measure(tree: *node.Tree, d: widget.Text, c: layout.Constraints) geo.Size
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, rect: geo.Rect, d: widget.Text) void {
     if (d.text.len == 0) return;
     if (tree.text_system) |ts| {
+        const font = d.font orelse tree.theme_ref.font_ui;
+        const color = d.color orelse tree.theme_ref.text;
         // 用 rect 宽度换行约束；wrap/ellipsis 由控件数据决定。
         const opts = painter.TextLayoutOptions{ .wrap = d.wrap, .ellipsis = d.ellipsis };
-        if (ts.layout(d.text, &tree.theme_ref.font_ui, rect.w, opts)) |tl| {
-            pc.drawText(rect, tl, tree.theme_ref.text);
+        if (ts.layout(d.text, &font, rect.w, opts)) |tl| {
+            pc.drawText(rect, tl, color);
         }
     }
 }

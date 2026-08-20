@@ -52,6 +52,7 @@ pub const zig = zw.zig;
 // —— 命名空间（结构体/枚举/常量）——
 pub const foundation = zw.foundation;
 pub const windows_and_messaging = zw.ui.windows_and_messaging;
+pub const controls = zw.ui.controls; // MARGINS（DWM 帧扩展用）
 pub const hi_dpi = zw.ui.hi_dpi;
 pub const system_information = zw.system.system_information;
 pub const system_ole = zw.system.ole; // 剪贴板格式（CF_UNICODETEXT 等）

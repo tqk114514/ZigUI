@@ -9,18 +9,23 @@
 const std = @import("std");
 const geo = @import("geometry.zig");
 const layout = @import("layout.zig");
+const theme = @import("../theme.zig");
 
 /// 各内建控件的数据 struct —— 均为纯数据，字段语义见 §5 各节。
 /// 纯布局容器，不绘制；无额外数据。
 pub const Box = struct {};
 
-/// 文本控件数据（含 wrap/ellipsis 选项）。
+/// 文本控件数据（含 wrap/ellipsis 选项与可选排版槽）。
 pub const Text = struct {
     text: []const u8,
     /// 超出可用宽度时换行（多行）。默认单行不换行。
     wrap: bool = false,
     /// 超宽时尾部省略号（单行）。与 wrap 互斥。
     ellipsis: bool = false,
+    /// 可选字体槽位（§5.2 排版层级 font_title/font_caption）。null = font_ui。
+    font: ?theme.Font = null,
+    /// 可选文本色（L9 token）。null = theme.text。
+    color: ?theme.Color = null,
 };
 
 /// 按钮控件数据。

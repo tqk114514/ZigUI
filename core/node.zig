@@ -171,6 +171,8 @@ pub const Tree = struct {
     dispatch_table: ?*const DispatchTable = null,
     /// 光标闪烁相位（§5.8 编辑框 WM_TIMER 530ms 翻转；Edit paint 只读，不写）。
     caret_blink_on: bool = true,
+    /// 窗口内容区顶部偏移（DIP，§5.9 自定义标题栏；root 从该处开始排布）。
+    content_top: f32 = 0,
     /// 观测用：arrange 实际重排子树的次数（测试断言传播终止）。
     relayout_count: usize = 0,
 
@@ -232,13 +234,18 @@ pub const Tree = struct {
     }
 
     /// 惰性布局：绘制前或任何读 rect 前必须调用（§5.3）。稳态零分配。
+    /// root 从 content_top（§5.9 自定义标题栏）开始排布，尺寸 = 窗口减顶部偏移。
     pub fn ensureLayout(t: *Tree, window_size: geo.Size) void {
         const root_c = layout.Constraints{
             .min = window_size,
             .max = window_size,
         };
         _ = t.measure(t.root, root_c);
-        t.root.rect = .{ .w = window_size.width, .h = window_size.height };
+        t.root.rect = .{
+            .y = t.content_top,
+            .w = window_size.width,
+            .h = window_size.height - t.content_top,
+        };
         t.arrange(t.root, t.root.rect);
     }
 
