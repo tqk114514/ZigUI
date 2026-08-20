@@ -69,16 +69,11 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// 示例清单（examples/，CI 全量编译）。
+/// 示例清单（examples/，CI 全量编译）。M7 示例精简：只保留 bench（性能压测）与
+/// demo（组件展示页），其余示例并入 demo 不再单独保留。
 const M0_EXAMPLES = [_][]const u8{
-    "theme_preview",
-    "counter",
-    "focus",
-    "threads",
-    "text",
+    "demo",
     "bench",
-    "edit",
-    "gallery",
 };
 
 /// zig-win32 只提供声明；系统库的链接在 Zig 0.16 中位于 Module 层（规则 §5.9

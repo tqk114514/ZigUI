@@ -8,26 +8,19 @@
 //! - 缓存命中率经 debug 开关周期性输出（§8.5）；
 //! - 中文/拉丁 fallback 由 DWrite 系统字体集合自动处理。
 //!
-//! 设计注记：本文件与 render/cache.zig 均为专用对象缓存。
-//! TODO(M7)：提取通用对象缓存容器（泛型 Key→Entry），TextLayout/Brush/Bitmap 均以其为实例。
+//! 设计注记：TextLayout 缓存复用 render/cache.zig 的通用 ObjectCache（预算/LRU/驱逐统一）。
 
 const std = @import("std");
 const win32 = @import("../platform/win32.zig");
 const dw = win32.direct_write;
 const painter = @import("../core/painter.zig");
 const theme = @import("../theme.zig");
+const cache_mod = @import("cache.zig");
 
 const log = std.log.scoped(.text);
 
-/// TextLayout 缓存预算（§5.6 有界缓存）：按物理内存比例自适应，
-/// 上/下限是防失控护栏。TODO(M7)：精确比例在统一对象缓存容器时一并调优。
-const DEFAULT_BUDGET_MIN: usize = 8 * 1024 * 1024; // 8MB 下限（小内存兜底）
-const DEFAULT_BUDGET_MAX: usize = 128 * 1024 * 1024; // 128MB 上限（防失控）
-/// 预算比例 = 物理内存 × 0.5%（1/200）。
-const BUDGET_FRACTION: usize = 200;
-/// 每条目固定开销（TextLayout 对象 + 键 + 节点 + 链表）。
+/// TextLayout 条目内存估算（预算治理用，无需精确）。
 const ENTRY_BASE_BYTES: usize = 4096;
-/// 每 UTF-8 字节的估算开销（UTF-16 转换 + shaping 结构，粗估）。
 const TEXT_BYTES_PER_CHAR: usize = 64;
 
 /// 缓存键栈缓冲容量：覆盖常见短文本键（帧路径零分配，L4）；超长才走堆。
@@ -38,15 +31,6 @@ fn entrySize(text_len: usize) usize {
     return ENTRY_BASE_BYTES + text_len * TEXT_BYTES_PER_CHAR;
 }
 
-/// 默认预算：clamp(物理内存 / 200, 8MB, 128MB)。读取失败回退下限。
-fn defaultBudgetBytes() usize {
-    var ms: win32.system_information.MEMORYSTATUSEX = undefined;
-    ms.dwLength = @sizeOf(win32.system_information.MEMORYSTATUSEX);
-    if (win32.kernel32.GlobalMemoryStatusEx(&ms) == 0) return DEFAULT_BUDGET_MIN;
-    const budget = ms.ullTotalPhys / BUDGET_FRACTION;
-    return std.math.clamp(budget, DEFAULT_BUDGET_MIN, DEFAULT_BUDGET_MAX);
-}
-
 /// DWrite TextSystem 实现。持有工厂与两级缓存。
 pub const TextSystemImpl = struct {
     /// 分配器（页面级，缓存键/条目归属）。
@@ -55,25 +39,15 @@ pub const TextSystemImpl = struct {
     factory: *dw.IDWriteFactory,
     /// TextFormat 按（字族+字号+字重）缓存。数量少（theme 两槽），无界。
     format_cache: std.StringHashMapUnmanaged(*dw.IDWriteTextFormat) = .empty,
-    /// TextLayout LRU：StringHashMap（键 → 节点）+ 双向链表（头 = 最近使用）。
-    layout_map: std.StringHashMapUnmanaged(*LayoutNode) = .empty,
-    layout_head: ?*LayoutNode = null,
-    layout_tail: ?*LayoutNode = null,
-    layout_count: usize = 0,
-    /// 当前占用字节（估算）。超出 budget 时 LRU 驱逐最旧。
-    used_bytes: usize = 0,
-    /// 内存预算（字节）：init 时由物理内存比例算定，内部定值、不可配置。
-    budget: usize = undefined,
-    /// 命中率统计（§8.5 debug 输出）。
-    hits: u64 = 0,
-    misses: u64 = 0,
+    /// TextLayout 缓存：基于通用 ObjectCache（LRU + 内存预算自适应，§5.6）。
+    layouts: cache_mod.ObjectCache(LayoutEntry, TextLayoutCtx),
 
     /// 装配入口：预算按系统物理内存比例算定（§5.6），内部定值。
     pub fn init(allocator: std.mem.Allocator, factory: *dw.IDWriteFactory) TextSystemImpl {
         return .{
             .allocator = allocator,
             .factory = factory,
-            .budget = defaultBudgetBytes(),
+            .layouts = cache_mod.ObjectCache(LayoutEntry, TextLayoutCtx).init(allocator, cache_mod.defaultBudgetBytes()),
         };
     }
 
@@ -87,42 +61,54 @@ pub const TextSystemImpl = struct {
         ellipsis_sign: ?*dw.IDWriteInlineObject = null,
     };
 
-    const LayoutNode = struct {
-        key: []const u8, // map 键（本模块拥有，驱逐/销毁时释放）
-        entry: *LayoutEntry,
-        prev: ?*LayoutNode,
-        next: ?*LayoutNode,
-        /// 估算字节（驱逐时从 used_bytes 扣减）。
-        size: usize,
+    /// 文本条目生命周期钩子（ObjectCache Ctx）：key 堆化、驱逐时释放 COM 对象。
+    pub const TextLayoutCtx = struct {
+        pub fn dupKey(a: std.mem.Allocator, key: []const u8) ![]const u8 {
+            return a.dupe(u8, key);
+        }
+        pub fn freeKey(a: std.mem.Allocator, owned: []const u8) void {
+            a.free(owned);
+        }
+        pub fn destroyValue(a: std.mem.Allocator, owned_key: []const u8, value: *LayoutEntry) void {
+            _ = value.dw_layout.IUnknown.Release();
+            if (value.ellipsis_sign) |s| _ = s.IUnknown.Release();
+            a.free(owned_key);
+        }
     };
 
     pub fn layout(self: *TextSystemImpl, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) ?*painter.TextLayout {
         // 键优先写入栈缓冲：measure/paint 是帧路径（L4），缓存命中零分配。
         var stack_key: [KEY_STACK_CAP]u8 = undefined;
         const key = cacheKey(&stack_key, self.allocator, text, font, max_width, options) catch return null;
-        // 命中：移链表头（LRU 保序），释放临时堆键（栈键无需释放）。
-        if (self.layout_map.get(key.data)) |node| {
-            self.hits += 1;
+        // 命中：容器内移链表头（LRU 保序），释放临时堆键（栈键无需释放）。
+        if (self.layouts.get(key.data)) |e| {
             if (key.heap) self.allocator.free(key.data);
-            self.moveToHead(node);
-            return &node.entry.tl;
+            return &e.tl;
         }
-        self.misses += 1;
-        // miss：需要持久键。栈键拷贝入堆；堆键直接转交（缓存持有）。
-        const persist: []const u8 = if (key.heap)
-            key.data
-        else
-            (self.allocator.dupe(u8, key.data) catch return null);
-        const tl = self.createAndCache(persist, text, font, max_width, options) catch {
-            self.allocator.free(persist);
+        // miss：构造条目后交由容器缓存（容器内 dupKey 持久化 key）。
+        const value = self.createValue(text, font, max_width, options) catch {
+            if (key.heap) self.allocator.free(key.data);
             return null;
         };
+        const e = self.layouts.add(key.data, value, entrySize(text.len)) catch {
+            self.destroyValue(value);
+            if (key.heap) self.allocator.free(key.data);
+            return null;
+        };
+        if (key.heap) self.allocator.free(key.data);
         self.logStatsMaybe();
-        return tl;
+        return &e.tl;
     }
 
-    /// 创建并缓存（失败返回 error，key 由调用方负责释放）。
-    fn createAndCache(self: *TextSystemImpl, key: []const u8, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) !*painter.TextLayout {
+    /// 释放一个未入缓存的 LayoutEntry 内部 COM 对象（add 失败回滚用）。
+    fn destroyValue(self: *TextSystemImpl, value: LayoutEntry) void {
+        _ = self;
+        _ = value.dw_layout.IUnknown.Release();
+        if (value.ellipsis_sign) |s| _ = s.IUnknown.Release();
+    }
+
+    /// 创建 TextLayout 条目（失败返回 error，调用方不拥有任何已分配资源）。
+    fn createValue(self: *TextSystemImpl, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) !LayoutEntry {
         const fmt = self.formatFor(font) orelse return error.FormatFailed;
 
         const utf16 = try std.unicode.utf8ToUtf16LeAlloc(self.allocator, text);
@@ -130,17 +116,12 @@ pub const TextSystemImpl = struct {
         const utf16_z = try self.allocator.dupeZ(u16, utf16);
         defer self.allocator.free(utf16_z);
 
-        // —— 统一失败清理（成功时 linked=true 跳过）——
+        // —— 统一失败清理（成功时返回前把所有权交出）——
         var dw_layout: ?*dw.IDWriteTextLayout = null;
         var ellipsis_sign: ?*dw.IDWriteInlineObject = null;
-        var entry: ?*LayoutEntry = null;
-        var node: ?*LayoutNode = null;
-        var linked = false;
-        defer if (!linked) {
-            if (node) |n| self.allocator.destroy(n);
-            if (entry) |e| self.allocator.destroy(e);
+        defer if (dw_layout != null) {
             if (ellipsis_sign) |s| _ = s.IUnknown.Release();
-            if (dw_layout) |l| _ = l.IUnknown.Release();
+            _ = dw_layout.?.IUnknown.Release();
         };
 
         const w = if (max_width > 0) max_width else 1_000_000.0;
@@ -172,8 +153,8 @@ pub const TextSystemImpl = struct {
         // ellipsis 且超宽：实际显示宽度不超过 max_width（measure 消费）。
         if (options.ellipsis and max_width > 0 and bw > max_width) bw = max_width;
 
-        entry = try self.allocator.create(LayoutEntry);
-        entry.?.* = .{
+        // 所有权转交返回：清除 defer 的释放标记。
+        const out = LayoutEntry{
             .tl = .{
                 .bounds = .{ .width = bw, .height = metrics.height },
                 .width_with_ws = metrics.widthIncludingTrailingWhitespace,
@@ -182,18 +163,9 @@ pub const TextSystemImpl = struct {
             .dw_layout = raw_layout,
             .ellipsis_sign = ellipsis_sign,
         };
-
-        node = try self.allocator.create(LayoutNode);
-        node.?.* = .{ .key = key, .entry = entry.?, .prev = null, .next = null, .size = entrySize(text.len) };
-        try self.layout_map.put(self.allocator, key, node.?); // 失败：node 未入链表
-        self.linkHead(node.?); // 成功后才链接
-        linked = true;
-
-        self.layout_count += 1;
-        self.used_bytes += node.?.size;
-        // 超预算：LRU 驱逐最旧直到 fit（内存有界，§5.6）。
-        while (self.used_bytes > self.budget and self.layout_tail != null) self.evict();
-        return &entry.?.tl;
+        dw_layout = null;
+        ellipsis_sign = null;
+        return out;
     }
 
     // —— TextFormat 缓存（按 字族+字号+字重）——
@@ -239,66 +211,22 @@ pub const TextSystemImpl = struct {
         return fmt;
     }
 
-    // —— LRU 链表操作 ——
-
-    fn linkHead(self: *TextSystemImpl, node: *LayoutNode) void {
-        node.prev = null;
-        node.next = self.layout_head;
-        if (self.layout_head) |h| h.prev = node;
-        self.layout_head = node;
-        if (self.layout_tail == null) self.layout_tail = node;
-    }
-
-    fn moveToHead(self: *TextSystemImpl, node: *LayoutNode) void {
-        if (self.layout_head == node) return;
-        // 摘除
-        if (node.prev) |p| p.next = node.next else self.layout_head = node.next;
-        if (node.next) |n| n.prev = node.prev else self.layout_tail = node.prev;
-        self.linkHead(node);
-    }
-
-    fn evict(self: *TextSystemImpl) void {
-        const t = self.layout_tail orelse return;
-        const size = t.size; // destroy 前先取（避免 UAF）
-        // 摘除尾
-        if (t.prev) |p| p.next = null else self.layout_head = null;
-        self.layout_tail = t.prev;
-        _ = self.layout_map.remove(t.key);
-        // 释放
-        _ = t.entry.dw_layout.IUnknown.Release();
-        if (t.entry.ellipsis_sign) |s| _ = s.IUnknown.Release();
-        self.allocator.destroy(t.entry);
-        self.allocator.free(t.key);
-        self.allocator.destroy(t);
-        self.layout_count -= 1;
-        self.used_bytes -= size;
-    }
-
     // —— 统计（§8.5 debug 开关）——
 
     fn logStatsMaybe(self: *TextSystemImpl) void {
-        const total = self.hits + self.misses;
+        const total = self.layouts.hits + self.layouts.misses;
         if (total > 0 and total % 50_000 == 0) {
-            const rate: f64 = @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total)) * 100.0;
+            const rate: f64 = @as(f64, @floatFromInt(self.layouts.hits)) / @as(f64, @floatFromInt(total)) * 100.0;
             log.debug("text cache: {d}/{d} hits ({d:.1}%), {d} entries, {d:.1} MB / {d:.1} MB", .{
-                self.hits,                                            total,                                            rate, self.layout_count,
-                @as(f64, @floatFromInt(self.used_bytes)) / 1048576.0, @as(f64, @floatFromInt(self.budget)) / 1048576.0,
+                self.layouts.hits,                                            total,                                                    rate, self.layouts.count,
+                @as(f64, @floatFromInt(self.layouts.used_bytes)) / 1048576.0, @as(f64, @floatFromInt(self.layouts.budget)) / 1048576.0,
             });
         }
     }
 
     pub fn deinit(self: *TextSystemImpl) void {
-        // 释放全部 TextLayout（entry + key + node）。
-        var it = self.layout_map.iterator();
-        while (it.next()) |e| {
-            const n = e.value_ptr.*;
-            _ = n.entry.dw_layout.IUnknown.Release();
-            if (n.entry.ellipsis_sign) |s| _ = s.IUnknown.Release();
-            self.allocator.destroy(n.entry);
-            self.allocator.free(e.key_ptr.*);
-            self.allocator.destroy(n);
-        }
-        self.layout_map.deinit(self.allocator);
+        // 释放全部 TextLayout（ObjectCache 统一 handle）。
+        self.layouts.deinit();
         // 释放 TextFormat。
         var fit = self.format_cache.iterator();
         while (fit.next()) |e| {
@@ -307,9 +235,9 @@ pub const TextSystemImpl = struct {
         }
         self.format_cache.deinit(self.allocator);
         // 命中率汇总。
-        if (self.hits + self.misses > 0) {
-            const rate: f64 = @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(self.hits + self.misses)) * 100.0;
-            log.debug("text cache deinit: {d} hits / {d} misses ({d:.1}%)", .{ self.hits, self.misses, rate });
+        if (self.layouts.hits + self.layouts.misses > 0) {
+            const rate: f64 = @as(f64, @floatFromInt(self.layouts.hits)) / @as(f64, @floatFromInt(self.layouts.hits + self.layouts.misses)) * 100.0;
+            log.debug("text cache deinit: {d} hits / {d} misses ({d:.1}%)", .{ self.layouts.hits, self.layouts.misses, rate });
         }
     }
 };
