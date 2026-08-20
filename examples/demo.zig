@@ -66,11 +66,8 @@ pub fn main() anyerror!void {
     defer tree.deinit();
 
     tree.root.layout = .{ .column = .{ .gap = theme.light.spacing.md } };
-    tree.root.style = .{ .bg = theme.light.bg_window };
-
-    // 页眉：标题 + 副标题（排版层级）。
-    try addText(&tree, "ZigUI 组件预览", theme.light.font_title, null);
-    try addText(&tree, "Windows 原生渲染 · Direct2D + DirectWrite · 浅色主题", theme.light.font_caption, theme.light.text_weak);
+    // 内容与窗口四边保持最小间距（类似 Web body 的隔离，防止 UI 贴边；§5.3 padding 语义）。
+    tree.root.style = .{ .padding = .all(theme.light.spacing.md), .bg = theme.light.bg_window };
 
     // 按钮（行内三个）。
     try addLabel(&tree, "按钮 BUTTONS");
@@ -101,6 +98,6 @@ pub fn main() anyerror!void {
     try addLabel(&tree, "输入框 EDIT");
     try addEdit(&tree, "hello 世界");
 
-    const title = std.unicode.utf8ToUtf16LeStringLiteral("zigui — demo");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("ZigUI DEMO");
     _ = try ui.platform.window.run(.{ .title = title, .theme_ref = &theme.light }, &tree);
 }

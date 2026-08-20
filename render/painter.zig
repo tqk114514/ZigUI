@@ -66,10 +66,13 @@ pub const D2DPainter = struct {
     fn implStrokeRect(impl: *anyopaque, rect: geometry.Rect, color: theme.Color, width: f32, radius: f32) void {
         const self = selfOf(impl);
         if (brushFor(self, color)) |b| {
-            // 先内缩半线宽再像素对齐：stroke 以边界为中心线向两侧各画 w/2，
-            // 内缩后边界落在整像素上，1px 边框恰好覆盖单个像素带，四边均匀锐利（§5.6）。
-            const half = width * 0.5;
-            const inner = snapRectToPixels(rect.inset(geometry.Edges.all(half)), self.device.dpi_scale);
+            // stroke 与 fill 共用同一像素基准（§5.6）：先对 rect 对齐整像素网格
+            // （与 fillRect/fillRoundedRect 一致），再内缩半线宽。此时边界必落在
+            // 像素中心（整像素 − half），1px 描边恰好覆盖单个像素带；四边与 fill
+            // 无缝衔接、均匀锐利。若对原始 rect 独立对齐半像素，边界非半像素值时
+            // 会漂移错位，出现某条边被抗锯齿摊薄（如上边模糊）。
+            const base = snapRectToPixels(rect, self.device.dpi_scale);
+            const inner = base.inset(geometry.Edges.all(width * 0.5));
             if (radius > 0) {
                 const rr = d2d.D2D1_ROUNDED_RECT{
                     .rect = toD2DRect(inner),
