@@ -76,8 +76,6 @@ pub fn main() anyerror!void {
         try addButton(&tree, row, "主操作", false);
         try addButton(&tree, row, "次操作", false);
         try addButton(&tree, row, "禁用", true);
-        // 初始焦点落在主操作，展示焦点光环（§5.2 focus_ring）。
-        tree.focus = row.children[0];
     }
 
     // 复选框（行内三个）。
