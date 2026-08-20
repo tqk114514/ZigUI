@@ -66,7 +66,7 @@ pub fn main() anyerror!void {
     defer tree.deinit();
 
     tree.root.layout = .{ .column = .{ .gap = theme.light.spacing.md } };
-    tree.root.style = .{ .padding = .all(theme.light.spacing.lg), .bg = theme.light.bg_window };
+    tree.root.style = .{ .bg = theme.light.bg_window };
 
     // 页眉：标题 + 副标题（排版层级）。
     try addText(&tree, "ZigUI 组件预览", theme.light.font_title, null);
@@ -89,7 +89,7 @@ pub fn main() anyerror!void {
         const row = try addRow(&tree);
         try addCheckbox(&tree, row, "已勾选", true, false);
         try addCheckbox(&tree, row, "未勾选", false, false);
-        try addCheckbox(&tree, row, "禁用勾选", true, true);
+        try addCheckbox(&tree, row, "禁用勾选", false, true);
     }
 
     // 滑块（各占一行）。

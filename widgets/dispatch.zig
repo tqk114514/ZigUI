@@ -58,6 +58,8 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
 /// 内建控件事件处理（§5.4/§5.8）：Edit 键盘/文本/IME、checkbox/slider/scroll 交互。
 /// 返回 true = 已消费。
 fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
+    // disabled 吸收一切输入（§5.8）：既不动作也不冒泡，避免触发用户 handler。
+    if (n.flags.disabled) return true;
     return switch (n.widget) {
         .edit => edit.onEvent(tree, n, e),
         .checkbox => check.onEvent(tree, n, e),
@@ -139,4 +141,23 @@ test "slider drag end notifies handler even when released off-node (§6)" {
     _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 193, .y = 90 } } });
     // 拖动结束必须通知 handler（拖拽型控件，与抬起位置无关，§6）。
     try std.testing.expectEqual(@as(u32, 1), notified);
+}
+
+test "disabled widget absorbs pointer input (no toggle)" {
+    const theme = @import("../theme.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    t.dispatch_table = &table;
+
+    const n = try t.createNode(t.root);
+    n.widget = .{ .checkbox = .{ .label = "禁用勾选", .checked = false } };
+    n.flags.disabled = true;
+    n.rect = .{ .x = 0, .y = 0, .w = 80, .h = 20 };
+
+    // disabled 吸收输入（§5.8）：点击不切换勾选。
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 5, .y = 10 } } });
+    _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 5, .y = 10 } } });
+    try std.testing.expect(!n.widget.checkbox.checked);
 }

@@ -56,7 +56,8 @@ pub const D2DPainter = struct {
 
     fn implFillRect(impl: *anyopaque, rect: geometry.Rect, color: theme.Color) void {
         const self = selfOf(impl);
-        const d2d_rect = toD2DRect(rect);
+        const r = snapRectToPixels(rect, self.device.dpi_scale);
+        const d2d_rect = toD2DRect(r);
         if (brushFor(self, color)) |b| {
             self.device.rt.?.ID2D1RenderTarget.FillRectangle(&d2d_rect, brushCast(b));
         }
@@ -65,9 +66,13 @@ pub const D2DPainter = struct {
     fn implStrokeRect(impl: *anyopaque, rect: geometry.Rect, color: theme.Color, width: f32, radius: f32) void {
         const self = selfOf(impl);
         if (brushFor(self, color)) |b| {
+            // 先内缩半线宽再像素对齐：stroke 以边界为中心线向两侧各画 w/2，
+            // 内缩后边界落在整像素上，1px 边框恰好覆盖单个像素带，四边均匀锐利（§5.6）。
+            const half = width * 0.5;
+            const inner = snapRectToPixels(rect.inset(geometry.Edges.all(half)), self.device.dpi_scale);
             if (radius > 0) {
                 const rr = d2d.D2D1_ROUNDED_RECT{
-                    .rect = toD2DRect(rect),
+                    .rect = toD2DRect(inner),
                     .radiusX = radius,
                     .radiusY = radius,
                 };
@@ -79,7 +84,7 @@ pub const D2DPainter = struct {
                 );
             } else {
                 self.device.rt.?.ID2D1RenderTarget.DrawRectangle(
-                    &toD2DRect(rect),
+                    &toD2DRect(inner),
                     brushCast(b),
                     width,
                     null,
@@ -90,9 +95,10 @@ pub const D2DPainter = struct {
 
     fn implFillRoundedRect(impl: *anyopaque, rect: geometry.Rect, radius: f32, color: theme.Color) void {
         const self = selfOf(impl);
+        const r = snapRectToPixels(rect, self.device.dpi_scale);
         if (brushFor(self, color)) |b| {
             const rr = d2d.D2D1_ROUNDED_RECT{
-                .rect = toD2DRect(rect),
+                .rect = toD2DRect(r),
                 .radiusX = radius,
                 .radiusY = radius,
             };
@@ -142,9 +148,15 @@ pub const D2DPainter = struct {
 
     fn implFillEllipse(impl: *anyopaque, center: geometry.Point, rx: f32, ry: f32, color: theme.Color) void {
         const self = selfOf(impl);
+        // 圆心对齐像素网格（滑块拇指等小圆形锐利；§5.6）。
+        const scale = self.device.dpi_scale;
+        const c = geometry.Point{
+            .x = @as(f32, @floatFromInt(geometry.snap(center.x * scale))) / scale,
+            .y = @as(f32, @floatFromInt(geometry.snap(center.y * scale))) / scale,
+        };
         if (brushFor(self, color)) |b| {
             const e = d2d.D2D1_ELLIPSE{
-                .point = .{ .x = center.x, .y = center.y },
+                .point = .{ .x = c.x, .y = c.y },
                 .radiusX = rx,
                 .radiusY = ry,
             };
@@ -209,7 +221,39 @@ fn toD2DRect(r: geometry.Rect) d2d.common.D2D_RECT_F {
     return .{ .left = r.x, .top = r.y, .right = r.x + r.w, .bottom = r.y + r.h };
 }
 
+/// 矩形四边对齐物理像素网格（pixel snapping，§5.6）：DIP × scale 取整后再除回，
+/// 使边界落在整像素上——fill/stroke 四边视觉均匀、无半像素抗锯齿错位。
+/// 本项目唯一 DIP→物理像素取整点仍是 core/geometry.snap（§5.1），此处复用其规则。
+fn snapRectToPixels(r: geometry.Rect, scale: f32) geometry.Rect {
+    if (scale <= 0) return r;
+    const x = @as(f32, @floatFromInt(geometry.snap(r.x * scale))) / scale;
+    const y = @as(f32, @floatFromInt(geometry.snap(r.y * scale))) / scale;
+    const x2 = @as(f32, @floatFromInt(geometry.snap((r.x + r.w) * scale))) / scale;
+    const y2 = @as(f32, @floatFromInt(geometry.snap((r.y + r.h) * scale))) / scale;
+    return .{ .x = x, .y = y, .w = x2 - x, .h = y2 - y };
+}
+
 /// SolidColorBrush → ID2D1Brush（extern union 同址，指针转换）。
 fn brushCast(b: *d2d.ID2D1SolidColorBrush) ?*d2d.ID2D1Brush {
     return @ptrCast(b);
+}
+
+test "snapRectToPixels aligns edges to pixel grid" {
+    // scale=1：边界取整。
+    const r1 = snapRectToPixels(.{ .x = 10.5, .y = 3.2, .w = 5.4, .h = 4.6 }, 1.0);
+    try std.testing.expect(geometry.approxEq(r1.x, 11));
+    try std.testing.expect(geometry.approxEq(r1.y, 3));
+    try std.testing.expect(geometry.approxEq(r1.w, 5)); // right=16 → 11+5
+    try std.testing.expect(geometry.approxEq(r1.h, 5)); // bottom=8 → 3+5
+
+    // scale=2（200%）：DIP 半像素也对齐到整物理像素。
+    const r2 = snapRectToPixels(.{ .x = 10.25, .y = 10.25, .w = 5.5, .h = 5.5 }, 2.0);
+    try std.testing.expect(geometry.approxEq(r2.x, 10.5)); // 20.5 → 21 / 2
+    try std.testing.expect(geometry.approxEq(r2.w, 5.0)); // right 30.5→31 /2 =15.5 → 10.5+5
+    // 负数对称。
+    const r3 = snapRectToPixels(.{ .x = -10.5, .y = -10.5, .w = 4.0, .h = 4.0 }, 1.0);
+    try std.testing.expect(geometry.approxEq(r3.x, -11));
+    // 退化 scale。
+    const r0 = snapRectToPixels(.{ .x = 1.5, .y = 1.5, .w = 2.0, .h = 2.0 }, 0.0);
+    try std.testing.expect(geometry.approxEq(r0.x, 1.5));
 }

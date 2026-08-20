@@ -5,7 +5,8 @@
 //! - pointer_down 进入 dragging 并按 x 定位；dragging 中 pointer_move 持续调值；
 //! - pointer_up 结束拖动，经 Node.release_anywhere（§6）无视抬起位置沿其冒泡，
 //!   通知 handler 拖动结束（反应式）；
-//! - hover/拖动视觉：滑块灰色遮罩取 bg_hover（类似 checkbox hover，§6）；
+//! - hover/拖动视觉：accent 底 hover 取 accent_hover（与 checkbox 勾选态 hover 一致，§6）；
+//!   仅在指针落入拇指圆内或拖动中触发，轨道悬停不触发；
 //! - v1 仅指针交互（TODO(M7)：键盘方向键调值）；
 //! - 视觉只取 theme token（L9）。
 //!
@@ -36,10 +37,10 @@ pub fn measure(tree: *node.Tree, d: widget.Slider, c: layout.Constraints) geo.Si
     return c.constrain(.{ .width = w, .height = ctrl_h });
 }
 
-/// 绘制：轨道（圆角底色）→ 已滑段（accent）→ 圆形拇指。hover/拖动时拇指灰色遮罩（bg_hover）。
+/// 绘制：轨道（圆角底色）→ 已滑段（accent）→ 圆形拇指。拇指灰色遮罩（bg_hover）
+/// 仅在鼠标落入拇指圆内或拖动中触发；轨道悬停不触发（§6）。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Slider) void {
     const th = tree.theme_ref;
-    const hover = tree.hover == n;
     const cy = n.rect.y + n.rect.h * 0.5;
     const frac = valueFraction(d);
     const radius = track_h * 0.5;
@@ -50,11 +51,17 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Sl
     }
     // 圆形拇指：中心跟随指针（行程 = 轨道宽 − 滑块宽，§6 与 setValueFromX 一致）。
     const thumb_cx = track.x + (track.w - thumb_size) * frac + thumb_size * 0.5;
+    // hover 视觉：与 checkbox 勾选态 hover 一致——accent 底 hover 取 accent_hover（§6）。
+    // 触发条件：指针落入拇指圆内 或 拖动中（轨道悬停不触发）。
+    const r2 = (thumb_size * 0.5) * (thumb_size * 0.5);
+    const dx = tree.pointer_pos.x - thumb_cx;
+    const dy = tree.pointer_pos.y - cy;
+    const over_thumb = (tree.hover == n and dx * dx + dy * dy <= r2) or d.dragging;
     pc.fillEllipse(
         .{ .x = thumb_cx, .y = cy },
         thumb_size * 0.5,
         thumb_size * 0.5,
-        if (hover or d.dragging) th.bg_hover else th.accent,
+        if (over_thumb) th.accent_hover else th.accent,
     );
 }
 
@@ -152,7 +159,7 @@ test "slider: value fraction clamps" {
     try std.testing.expect(geo.approxEq(0.5, valueFraction(d3)));
 }
 
-test "slider: hover shows gray mask on thumb (MockPainter)" {
+test "slider: hover uses accent_hover only when pointer over thumb (MockPainter)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var t = try node.Tree.init(arena.allocator(), &theme.light);
@@ -161,22 +168,30 @@ test "slider: hover shows gray mask on thumb (MockPainter)" {
     const n = try t.createNode(t.root);
     n.widget = .{ .slider = .{ .value = 50, .min = 0, .max = 100 } };
     n.rect = .{ .x = 0, .y = 0, .w = 100, .h = 20 };
+    // value=50 → 拇指中心 (50, 10)，半径 7。轨道两端悬停皆不应触发遮罩。
 
     var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
     defer mp.destroy();
-    // value=50 → 轨道 fillRoundedRect、已滑段 fillRoundedRect、拇指 fillEllipse。
 
-    // 无 hover：轨道 bg_pressed，拇指 accent。
+    // 无 hover：thumb accent。
+    t.pointer_pos = .{ .x = 50, .y = 10 };
     paint(&t, mp.ctx, n, n.widget.slider);
     try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_pressed.r);
     try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.accent.r);
 
-    // hover：拇指灰色遮罩（bg_hover），轨道不变，无描边。
+    // 悬停节点但指针在轨道左端（拇指圆外）：仍 accent，不触发。
     mp.reset();
     t.hover = n;
+    t.pointer_pos = .{ .x = 10, .y = 10 };
+    paint(&t, mp.ctx, n, n.widget.slider);
+    try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.accent.r);
+
+    // 悬停且指针落入拇指圆内：accent_hover（与 checkbox 勾选态 hover 一致），轨道不变，无描边。
+    mp.reset();
+    t.pointer_pos = .{ .x = 52, .y = 10 };
     paint(&t, mp.ctx, n, n.widget.slider);
     try std.testing.expect(mp.calls.items[0].fillRoundedRect.color.r == theme.light.bg_pressed.r);
-    try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.bg_hover.r);
+    try std.testing.expect(mp.calls.items[2].fillEllipse.color.r == theme.light.accent_hover.r);
     var strokes: usize = 0;
     for (mp.calls.items) |c| {
         if (c == .strokeRect) strokes += 1;

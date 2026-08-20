@@ -159,6 +159,10 @@ pub const Tree = struct {
     focus: ?*Node = null,
     /// 当前悬停节点（hover 状态推导，§5.3）。
     hover: ?*Node = null,
+    /// 最近一次指针事件位置（窗口 DIP，dispatch 维护）。供控件按指针细粒度
+    /// 判定（如 slider 仅在鼠标落入拇指圆内时触发 hover 遮罩）。首帧无指针事件时
+    /// 为 undefined，但仅当 hover 命中节点后才会被读取（此时必有已抵达的指针事件）。
+    pointer_pos: geo.Point = undefined,
     /// 当前按下节点（pressed 状态与拖选路由，§5.3）。
     active: ?*Node = null,
     /// 主题引用（§5.2：共享常量）。
@@ -404,14 +408,23 @@ pub const Tree = struct {
     /// 指针事件先 hit test 再沿 parent 冒泡；键盘事件走焦点链（§5.3）。
     /// 同时维护 hover / active 单值指针（供 Button 等状态机推导，§5.3）。
     pub fn dispatch(t: *Tree, e: *const event.Event) bool {
+        // 记录最近指针位置（DIP），供控件按指针细粒度判定（如 slider 拇指 hover）。
+        switch (e.*) {
+            .pointer_move => |p| t.pointer_pos = p.pos,
+            .pointer_down => |p| t.pointer_pos = p.pos,
+            .pointer_up => |p| t.pointer_pos = p.pos,
+            else => {},
+        }
         switch (e.*) {
             .pointer_move => |p| {
                 const hit = hitTest(t.root, p.pos);
+                // disabled 吸收一切输入（§5.8）：不作为 hover 目标（否则取 hover 变体）。
+                const hover_target = if (hit) |h| (if (h.flags.disabled) null else h) else null;
                 // hover 变化：旧节点与新节点都重绘。
-                if (t.hover != hit) {
+                if (t.hover != hover_target) {
                     if (t.hover) |old| old.invalidatePaint();
-                    t.hover = hit;
-                    if (hit) |n| n.invalidatePaint();
+                    t.hover = hover_target;
+                    if (hover_target) |n| n.invalidatePaint();
                 }
                 // 拖选：active 的 Edit 处理 pointer_move（即使移出边界）。
                 if (t.active) |a| {
@@ -872,6 +885,26 @@ test "click semantics: only same-node down+up triggers handler once" {
     _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 25, .y = 25 } } });
     _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 150, .y = 150 } } });
     try std.testing.expectEqual(@as(u32, 1), clicks);
+}
+
+test "disabled node is not a hover target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .{ .column = .{} };
+    const leaf = try addFixedLeaf(&t, t.root, .{ .width = 50, .height = 50 });
+    t.ensureLayout(.{ .width = 200, .height = 200 });
+
+    // 未禁用：pointer_move 命中 → hover = 节点。
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 25, .y = 25 } } });
+    try std.testing.expect(t.hover == leaf);
+
+    // 禁用：命中但不设 hover（disabled 吸收一切输入，§5.8）。
+    leaf.flags.disabled = true;
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 25, .y = 25 } } });
+    try std.testing.expect(t.hover == null);
 }
 
 test "find by id" {

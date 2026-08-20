@@ -303,15 +303,14 @@ fn titlebarHitButton(ctx: *const WindowCtx, p: geometry.Point) i8 {
     return BTN_NONE;
 }
 
-/// 绘制标题栏（§5.9）：背景（bg_window，与内容区一体）→ 底部 1px 分隔线 →
-/// 标题文本（左，font_ui）→ 三按钮（hover/pressed 视觉 + line 图标）。
+/// 绘制标题栏（§5.9）：背景（bg_window，与内容区一体，无分隔线）→
+/// 标题文本（左，font_ui）→ 三按钮（hover/pressed 视觉 + 字形图标）。
 fn paintTitlebar(ctx: *WindowCtx, pc: painter.PaintCtx) void {
     const th = ctx.theme_ref;
     const w = getClientSizeDips(ctx.device.?).width;
     const strip = geometry.Rect{ .x = 0, .y = 0, .w = w, .h = TITLEBAR_H };
-    // 背景与分隔线（L9：只取 theme token）。
+    // 背景（L9：只取 theme token）。与内容区间色，不画分隔线，视觉一体。
     pc.fillRect(strip, th.bg_window);
-    pc.fillRect(.{ .x = 0, .y = TITLEBAR_H - 1, .w = w, .h = 1 }, th.border);
 
     // 标题文本（左，垂直居中；前导 12 DIP 呼吸间距）。
     if (ctx.title_utf8.len > 0) {
@@ -709,6 +708,21 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 _ = w32.user32.EndPaint(hwnd, &ps);
                 return 0;
             }
+        },
+        // 光标形态：客户端内 Edit 控件 → I-beam，其余 → 箭头；标题栏/边框交系统默认。
+        w32.windows_and_messaging.WM_SETCURSOR => {
+            if (ctx != null and @as(u16, @truncate(@as(u64, @bitCast(l_param)))) == w32.windows_and_messaging.HTCLIENT) {
+                const scale = ctx.?.device.?.dpi_scale;
+                var pt = w32.foundation.POINT{ .x = 0, .y = 0 };
+                _ = w32.user32.GetCursorPos(&pt);
+                if (w32.user32.ScreenToClient(hwnd, &pt) != 0) {
+                    const p = geometry.Point{ .x = @as(f32, @floatFromInt(pt.x)) / scale, .y = @as(f32, @floatFromInt(pt.y)) / scale };
+                    const over_edit = if (node.Tree.hitTest(ctx.?.tree.root, p)) |hit| hit.widget == .edit else false;
+                    _ = w32.user32.SetCursor(w32.user32.LoadCursorW(null, if (over_edit) w32.windows_and_messaging.IDC_IBEAM else w32.windows_and_messaging.IDC_ARROW));
+                    return 1;
+                }
+            }
+            return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
         },
         w32.windows_and_messaging.WM_APP + 1 => {
             // dipui 任务（§5.9 消息归属表）：跨线程 post 的唤醒。

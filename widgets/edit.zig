@@ -57,11 +57,7 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ed
     const focus = tree.focus == n;
     const hover = tree.hover == n;
 
-    // 焦点光环（外扩 ring，键盘 Tab 聚焦）。
-    if (focus) {
-        pc.strokeRect(n.rect.outset(geo.Edges.all(1)), th.focus_ring, 2, th.radius.small + 1);
-    }
-    // 背景：悬停取 bg_hover；聚焦边框仍 accent（细边框 + 外环，不再加粗）。
+    // 背景：悬停取 bg_hover；聚焦边框用 accent（细边框指示焦点，无外扩光环）。
     pc.fillRoundedRect(n.rect, th.radius.small, if (hover) th.bg_hover else th.bg_surface);
     pc.strokeRect(n.rect, if (focus) th.accent else th.border, 1, th.radius.small);
 
