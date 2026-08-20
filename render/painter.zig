@@ -120,18 +120,24 @@ pub const D2DPainter = struct {
             if (points.len < 2) return;
             const dev = self.device;
             // 取（或惰性创建）复用的 path geometry：单对象缓存复用（§5.6 禁止每帧建对象）。
+            // 必须用 render target 所属工厂创建（dev.path_factory，与 rt 同域）——用显式
+            // D2D1CreateFactory 建的工厂会导致 D2DERR_WRONG_FACTORY（首帧 EndDraw 失败后整建）。
             // 走 DrawGeometry 而非 DrawLine：Zig 0.16 x64 对 DrawLine 两个连续 by-value
             // D2D_POINT_2F 的传参 codegen 段错误（DrawTextLayout 单点正常），绕开之。
             const geo = dev.path_geometry orelse blk: {
+                const fac = dev.path_factory orelse return;
                 var g: *d2d.ID2D1PathGeometry = undefined;
-                if (dev.d2d_factory.CreatePathGeometry(&g).failed) return;
+                if (fac.CreatePathGeometry(&g).failed) return;
                 dev.path_geometry = g;
                 break :blk g;
             };
             var sink: *d2d.ID2D1GeometrySink = undefined;
             if (geo.Open(&sink).failed) return;
             defer _ = sink.IUnknown.Release();
-            const s = sink.ID2D1SimplifiedGeometrySink;
+            // 取字段指针而非拷贝：COM 对象的方法经 vtable 派发，D2D 实现要读对象内部状态，
+            // 传栈上拷贝的地址会读到垃圾（首帧 BeginFigure 段错误）。字段在 union 偏移 0，
+            // 取址即原对象指针。
+            const s = &sink.ID2D1SimplifiedGeometrySink;
             s.BeginFigure(.{ .x = points[0].x, .y = points[0].y }, .HOLLOW);
             // 显式拷贝为 extern D2D_POINT_2F：不把普通 struct（geometry.Point）指针
             // @ptrCast 重解释给 D2D（普通 struct 布局不受保证），规避 ABI/布局问题。

@@ -168,17 +168,15 @@ const BrushCtx = struct {
 /// 颜色 → 实心画刷 缓存（基于 ObjectCache；颜色有限，预算默认足够故不驱逐）。
 pub const BrushCache = struct {
     allocator: std.mem.Allocator,
-    factory: *d2d.ID2D1Factory,
     /// 当前绑定的 render target（brush 由其创建，绑定时记录）。
     rt: ?*d2d.ID2D1RenderTarget = null,
     /// 底层通用对象缓存（key=颜色 4 字节，value=刷子指针）。
     entries: ObjectCache(*d2d.ID2D1SolidColorBrush, BrushCtx),
 
     /// 构造缓存。
-    pub fn init(allocator: std.mem.Allocator, factory: *d2d.ID2D1Factory) BrushCache {
+    pub fn init(allocator: std.mem.Allocator) BrushCache {
         return .{
             .allocator = allocator,
-            .factory = factory,
             .entries = ObjectCache(*d2d.ID2D1SolidColorBrush, BrushCtx).init(allocator, defaultBudgetBytes()),
         };
     }

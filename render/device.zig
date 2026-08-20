@@ -24,8 +24,9 @@ const log = std.log.scoped(.render);
 pub const Device = struct {
     /// 分配器（init 传入，页面级）。
     allocator: std.mem.Allocator,
-    /// D2D 工厂（UI 单线程；path geometry 用）。
-    d2d_factory: *d2d.ID2D1Factory,
+    /// 当前 render target 所属 D2D 工厂（path geometry 必须用它创建——与 rt 同域，
+    /// 否则 DrawGeometry 报 D2DERR_WRONG_FACTORY；设备重建后工厂变化，geometry 一并重建）。
+    path_factory: ?*d2d.ID2D1Factory = null,
     /// DWrite 工厂（线程安全，单例）。
     dwrite_factory: *dw.IDWriteFactory,
     /// 绑定的窗口句柄（L2：整个 UI 一个顶层 HWND）。
@@ -60,22 +61,9 @@ pub const Device = struct {
         const self = try allocator.create(Device);
         errdefer allocator.destroy(self);
 
-        // D2D 工厂（UI 单线程，免 debug 层）。
-        var d2d_factory: *d2d.ID2D1Factory = undefined;
-        var hr = win32.d2d1.D2D1CreateFactory(
-            .SINGLE_THREADED,
-            d2d.IID_ID2D1Factory,
-            null,
-            @ptrCast(&d2d_factory),
-        );
-        if (hr.failed) {
-            log.err("D2D1CreateFactory failed", .{});
-            return error.D2DFactoryFailed;
-        }
-
         // DWrite 工厂（线程安全，单例）。
         var dwrite_factory: *dw.IDWriteFactory = undefined;
-        hr = win32.dwrite.DWriteCreateFactory(
+        const hr = win32.dwrite.DWriteCreateFactory(
             .SHARED,
             dw.IID_IDWriteFactory,
             @ptrCast(&dwrite_factory),
@@ -87,10 +75,9 @@ pub const Device = struct {
 
         self.* = .{
             .allocator = allocator,
-            .d2d_factory = d2d_factory,
             .dwrite_factory = dwrite_factory,
             .hwnd = hwnd,
-            .brush_cache = cache.BrushCache.init(allocator, d2d_factory),
+            .brush_cache = cache.BrushCache.init(allocator),
             .text_system = text.TextSystemImpl.init(allocator, dwrite_factory),
         };
         // GPU 管线（D3D11 设备 + DXGI 工厂 + D2D 设备；交换链惰性创建）失败时清理已建的 COM 对象。
@@ -251,6 +238,13 @@ pub const Device = struct {
             if (self.d2d_device.?.CreateDeviceContext(d2d.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc).failed) return error.D2DDeviceContextFailed;
             self.rt = dc;
         }
+        // path geometry 必须与 rt 同工厂创建（§5.6：否则 DrawGeometry 报 D2DERR_WRONG_FACTORY）。
+        // 设备重建后此工厂变化，releaseGpu 已释放旧 geometry，这里随 rt 刷新。
+        {
+            var f: *d2d.ID2D1Factory = undefined;
+            self.rt.?.ID2D1Resource.GetFactory(&f);
+            self.path_factory = f;
+        }
         self.createBitmap() catch return error.D2DBitmapFailed;
         self.brush_cache.reset(); // 旧 brush 绑定旧 target，必须清空。
     }
@@ -327,7 +321,7 @@ pub const Device = struct {
         self.swap_chain = null;
     }
 
-    /// 释放 GPU 管线对象与 brush 缓存（设备丢失/重建共用；工厂与 text 系统保留）。
+    /// 释放 GPU 管线对象与 brush 缓存（设备丢失/重建共用；text 系统保留）。
     fn releaseGpu(self: *Device) void {
         self.releaseSwapChain();
         if (self.rt) |rt| _ = rt.IUnknown.Release();
@@ -335,6 +329,10 @@ pub const Device = struct {
         if (self.dxgi_factory) |f| _ = f.IUnknown.Release();
         if (self.d3d11_context) |c| _ = c.IUnknown.Release();
         if (self.d3d11_device) |d| _ = d.IUnknown.Release();
+        // path geometry 绑定旧设备工厂，随设备一并释放（§5.6 设备丢失路径）。
+        if (self.path_geometry) |g| _ = g.IUnknown.Release();
+        self.path_geometry = null;
+        self.path_factory = null;
         self.rt = null;
         self.d2d_device = null;
         self.dxgi_factory = null;
@@ -392,12 +390,10 @@ pub const Device = struct {
 
     /// 释放设备与全部缓存（GPU 管线 / render target / brush / 工厂）。
     pub fn deinit(self: *Device) void {
-        // releaseGpu 释放 GPU 管线与 brush（但保留 text_system/dwrite/d2d 工厂与 path geometry）。
+        // releaseGpu 释放 GPU 管线、brush 与 path geometry（保留 text 系统/dwrite 工厂）。
         self.releaseGpu();
-        if (self.path_geometry) |g| _ = g.IUnknown.Release();
         self.brush_cache.deinit();
         _ = self.dwrite_factory.IUnknown.Release();
-        _ = self.d2d_factory.IUnknown.Release();
         const a = self.allocator;
         a.destroy(self);
     }
