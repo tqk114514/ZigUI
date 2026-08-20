@@ -82,9 +82,9 @@ const M0_EXAMPLES = [_][]const u8{
 };
 
 /// zig-win32 只提供声明；系统库的链接在 Zig 0.16 中位于 Module 层（规则 §5.9
-/// 启动序列/消息表所涉 DLL），供引用平台的模块统一加入。
+/// 启动序列/消息表所涉 DLL，D3D11+flip 需 d3d11/dxgi），供引用平台的模块统一加入。
 fn linkNeededLibs(m: *std.Build.Module) void {
-    inline for (.{ "user32", "gdi32", "dwmapi", "ole32", "shell32", "imm32" }) |lib| {
+    inline for (.{ "user32", "gdi32", "dwmapi", "ole32", "shell32", "imm32", "d3d11", "dxgi" }) |lib| {
         m.linkSystemLibrary(lib, .{});
     }
 }

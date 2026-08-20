@@ -152,7 +152,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     };
     if (w32.user32.RegisterClassExW(&wnd_class) == 0) {
         if (w32.kernel32.GetLastError() != .ERROR_CLASS_ALREADY_EXISTS) {
-            log.err("RegisterClassExW failed, error={s}", .{@tagName(w32.kernel32.GetLastError())});
+            log.err("RegisterClassExW failed, error={d}", .{@intFromEnum(w32.kernel32.GetLastError())});
             return error.RegisterClassFailed;
         }
     }
@@ -172,7 +172,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         hinst,
         null,
     ) orelse {
-        log.err("CreateWindowExW failed, error={s}", .{@tagName(w32.kernel32.GetLastError())});
+        log.err("CreateWindowExW failed, error={d}", .{@intFromEnum(w32.kernel32.GetLastError())});
         return error.CreateWindowFailed;
     };
 
@@ -228,6 +228,11 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     //    显示后 WM_PAINT 会再正常重绘一帧，内容一致。
     renderFrame(&ctx);
     _ = w32.user32.ShowWindow(hwnd, w32.windows_and_messaging.SW_SHOW);
+    // 首帧带 swing 平面的翻转交换链（§5.6）：窗口未显示前 present 的表面不被 DWM 合成，
+    // 窗口一显示会以未初始化表面为白屏，直到一次输入事件触发重绘。显示后同步强制
+    // 重绘一次，保证首帧在"可见 + 最终尺寸"下真正 present。
+    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+    _ = w32.user32.UpdateWindow(hwnd);
 
     // 消息泵。
     var msg: w32.windows_and_messaging.MSG = undefined;
@@ -521,8 +526,12 @@ fn freeImeEventText(e: event.Event) void {
 
 /// 客户端尺寸（DIP）：物理像素 / dpi_scale。
 fn getClientSizeDips(dev: *device_mod.Device) geometry.Size {
-    const r = dev.rt.?.ID2D1RenderTarget.GetSize();
-    return .{ .width = r.width / dev.dpi_scale, .height = r.height / dev.dpi_scale };
+    // DIP 尺寸 = 物理像素 ÷ dpi_scale。不查 rt.GetSize()：ID2D1DeviceContext 在
+    // beginFrame SetTarget 之前无 target，GetSize 返回 0（旧 HwndRenderTarget 才总是可用）。
+    return .{
+        .width = @as(f32, @floatFromInt(dev.px_width)) / dev.dpi_scale,
+        .height = @as(f32, @floatFromInt(dev.px_height)) / dev.dpi_scale,
+    };
 }
 
 fn toD2DColor(c: theme.Color) w32.direct2d.common.D2D_COLOR_F {

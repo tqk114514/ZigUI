@@ -11,6 +11,8 @@
 const std = @import("std");
 const ui = @import("zigui");
 
+pub const std_options: std.Options = .{ .networking = false };
+
 const theme = ui.theme;
 
 // —— 演示用工具：事件等待（worker 模拟耗时且可被关闭唤醒）——

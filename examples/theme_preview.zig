@@ -4,6 +4,8 @@
 const std = @import("std");
 const ui = @import("zigui");
 
+pub const std_options: std.Options = .{ .networking = false };
+
 const theme = ui.theme;
 const T = ui.core.node.Tree;
 

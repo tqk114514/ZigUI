@@ -7,6 +7,8 @@
 const std = @import("std");
 const ui = @import("zigui");
 
+pub const std_options: std.Options = .{ .networking = false };
+
 const theme = ui.theme;
 
 // 高精度时钟（示例内声明；Zig 0.16 std 无 std.time.Timer）。
@@ -37,6 +39,8 @@ pub fn main(init: std.process.Init) anyerror!void {
     // arena 语义下是 O(n²) 内存膨胀，1M 级直接 OOM）。
     var children: std.ArrayListUnmanaged(*ui.core.node.Node) = .empty;
     defer children.deinit(arena.allocator());
+    // fps_label 需在树内才能被 frame_hook 更新，故先加入 children 列表打头。
+    try children.append(arena.allocator(), fps_label);
     var i: usize = 0;
     while (i < node_count) : (i += 1) {
         const s = try std.fmt.allocPrint(arena.allocator(), "text node {d} — 中文 mixed", .{i});
@@ -64,10 +68,11 @@ pub fn main(init: std.process.Init) anyerror!void {
             self.acc += dt;
             self.frames += 1;
             if (self.frames < FPS_WINDOW) return;
-            // 30 帧平均 FPS。
+            // 30 帧平均 FPS 与帧耗时（§4.9 记录项）。
             const avg = @divTrunc(self.acc, @as(i64, @intCast(FPS_WINDOW)));
             const fps = @as(f64, @floatFromInt(self.freq)) / @as(f64, @floatFromInt(avg));
-            self.label.widget.text.text = std.fmt.allocPrint(self.tree.arena.allocator(), "FPS: {d:.1} ({d} text nodes)", .{ fps, self.nodes }) catch return;
+            const ms = @as(f64, @floatFromInt(avg)) * 1000.0 / @as(f64, @floatFromInt(self.freq));
+            self.label.widget.text.text = std.fmt.allocPrint(self.tree.arena.allocator(), "FPS: {d:.1}  {d:.2}ms ({d} text nodes)", .{ fps, ms, self.nodes }) catch return;
             self.label.invalidateMeasure();
             self.label.invalidatePaint();
             self.frames = 0;

@@ -5,6 +5,8 @@
 const std = @import("std");
 const ui = @import("zigui");
 
+pub const std_options: std.Options = .{ .networking = false };
+
 const theme = ui.theme;
 const b = ui.widgets.builder;
 
@@ -66,7 +68,8 @@ const Fps = struct {
         if (self.frames < FPS_WINDOW) return;
         const avg = @divTrunc(self.acc, @as(i64, @intCast(FPS_WINDOW)));
         const fps = @as(f64, @floatFromInt(self.freq)) / @as(f64, @floatFromInt(avg));
-        self.label.widget.text.text = std.fmt.allocPrint(self.tree.arena.allocator(), "FPS: {d:.1} — 滚轮滚动长内容", .{fps}) catch return;
+        const ms = @as(f64, @floatFromInt(avg)) * 1000.0 / @as(f64, @floatFromInt(self.freq));
+        self.label.widget.text.text = std.fmt.allocPrint(self.tree.arena.allocator(), "FPS: {d:.1}  {d:.2}ms — 滚轮滚动长内容", .{ fps, ms }) catch return;
         self.label.invalidateMeasure();
         self.label.invalidatePaint();
         self.frames = 0;

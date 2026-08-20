@@ -45,6 +45,8 @@ pub const shell32 = zw.shell32;
 pub const imm32 = zw.imm32;
 pub const dwrite = zw.dwrite;
 pub const d2d1 = zw.d2d1;
+pub const d3d11 = zw.d3d11; // D3D11CreateDevice（D3D11+flip 呈现，§5.6）
+pub const dxgi_dll = zw.dxgi; // CreateDXGIFactory2（D3D11+flip 呈现，§5.6）
 
 // —— zigwin32 便捷层（COLORREF 等通用类型）——
 pub const zig = zw.zig;
@@ -61,6 +63,9 @@ pub const globalization = zw.globalization; // HIMC/HKL 等输入法句柄
 // —— 渲染命名空间 ——
 pub const direct2d = zw.graphics.direct2d;
 pub const direct_write = zw.graphics.direct_write;
+pub const direct3d = zw.graphics.direct3d; // D3D_DRIVER_TYPE / D3D_FEATURE_LEVEL（§5.6）
+pub const direct3d11 = zw.graphics.direct3d11; // ID3D11Device / ID3D11DeviceContext（§5.6）
+pub const dxgi = zw.graphics.dxgi; // 交换链/工厂/接口类型（§5.6）
 
 // —— DWM / GDI / 输入法 ——
 pub const dwm = zw.graphics.dwm;
