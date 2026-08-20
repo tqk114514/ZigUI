@@ -55,6 +55,34 @@ pub fn edit(tree: *node.Tree, parent: *node.Node, initial: []const u8) !*node.No
     return n;
 }
 
+/// 创建纵向滚动容器并挂到 parent（§6）：内容为其子节点，滚轮 / Edit 拖选越界滚动。
+/// 内容布局为 column（v1 只做纵向，§6 TODO(M7) 横向/滚动条）。
+pub fn scroll(tree: *node.Tree, parent: *node.Node) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.widget = .{ .scroll = .{} };
+    n.layout = .{ .column = .{} };
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 创建复选框节点（label 拷贝入 arena）。可聚焦（Tab 焦点环 + Space 切换，§6）。
+pub fn checkbox(tree: *node.Tree, parent: *node.Node, label: []const u8) !*node.Node {
+    const n = try tree.createNode(parent);
+    n.widget = .{ .checkbox = .{ .label = try tree.allocStr(label) } };
+    n.flags.focusable = true;
+    try tree.appendChild(parent, n);
+    return n;
+}
+
+/// 创建滑块节点（§6）。范围 [min, max]，初值 value（钳制到范围）。
+pub fn slider(tree: *node.Tree, parent: *node.Node, value: f32, min: f32, max: f32) !*node.Node {
+    const n = try tree.createNode(parent);
+    const v = if (max > min) @min(max, @max(min, value)) else min;
+    n.widget = .{ .slider = .{ .value = v, .min = min, .max = max } };
+    try tree.appendChild(parent, n);
+    return n;
+}
+
 /// 便捷：给节点设置 id（拷贝入 arena），供 find(id) 定位。
 pub fn setNodeId(tree: *node.Tree, n: *node.Node, id: []const u8) !void {
     n.id = try tree.allocStr(id);

@@ -53,6 +53,12 @@ pub const Node = struct {
     widget: widget.Widget = .none,
     dirty_measure: bool = true,
     dirty_paint: bool = true,
+    /// 布局脏标记（§6）：滚动偏移等"仅改显示不改尺寸"的变更强制 arrange 重排
+    /// （传播终止 §5.5 的例外）。沿祖先链置位，arrange 消费后清除。
+    layout_dirty: bool = false,
+    /// 拖拽型控件标记（§6，slider 等）：接管按下后置位；抬起事件无论是否命中自身
+    /// 都沿其冒泡（拖动结束通知 handler）。由 Tree.dispatch 在 pointer_up 读取并清除。
+    release_anywhere: bool = false,
     handler: ?EventHandler = null,
     handler_ctx: ?*anyopaque = null,
     /// 本次 measure 是否尺寸未变（传播终止用，每轮 ensureLayout 重置）。
@@ -72,6 +78,16 @@ pub const Node = struct {
         var cur: ?*Node = n;
         while (cur) |c| {
             c.dirty_paint = true;
+            cur = c.parent;
+        }
+    }
+
+    /// 标脏布局（§6）：滚动偏移等仅改显示的变更沿祖先链置位，强制下一轮 arrange
+    /// 重排本节点子树。不触碰 measure（尺寸未变，缓存保持命中）。
+    pub fn invalidateLayout(n: *Node) void {
+        var cur: ?*Node = n;
+        while (cur) |c| {
+            c.layout_dirty = true;
             cur = c.parent;
         }
     }
@@ -220,13 +236,14 @@ pub const Tree = struct {
 
     fn computeSize(t: *Tree, n: *Node, c: layout.Constraints) geo.Size {
         // 叶子控件：行为经 DispatchTable 委托（§5.4）；无 dispatch 时按空处理。
+        // 穷尽 switch（L8）：新增叶子控件必须在此登记，否则被当布局容器测得 0 尺寸。
         switch (n.widget) {
-            .text, .button, .edit => {
+            .text, .button, .edit, .checkbox, .slider => {
                 if (t.dispatch_table) |d| return c.constrain(d.measureWidget(t, n, c.loosen()));
                 return c.constrain(.{});
             },
             .custom => |cu| return c.constrain(cu.vtable.measure(cu.ctx, c.loosen())),
-            else => {}, // box / none / scroll 走布局容器
+            .box, .none, .scroll => {}, // 布局容器：走下方 padding/stack 逻辑
         }
 
         const pad = n.style.padding;
@@ -276,11 +293,16 @@ pub const Tree = struct {
         n.rect = bound;
 
         // 传播终止（§5.5）：本节点及后代本次均无变化且矩形未变 → 子树无需重排。
-        if (!n.desc_changed and rectEq(prev, bound)) return;
+        // layout_dirty（§6 滚动偏移变更）是唯一例外：强制重排本节点子树。
+        if (!n.desc_changed and rectEq(prev, bound) and !n.layout_dirty) return;
+        n.layout_dirty = false; // 消费本轮布局脏标记。
 
         if (n.children.len == 0) return;
         const pad = n.style.padding;
         const inner = n.rect.inset(pad);
+
+        // 主轴内容尺寸（不含 padding，内容坐标）。scroll 容器 arrange 后刷新 content_h。
+        var content_extent: f32 = 0;
 
         switch (n.layout) {
             .none => {
@@ -295,6 +317,10 @@ pub const Tree = struct {
                 const cross_len: f32 = if (axis == .horizontal) inner.h else inner.w;
 
                 var pos: f32 = main0;
+                // 滚动容器（§6，v1 纵向）：子节点按内容坐标排布，显示位置 = 内容位置 − 偏移。
+                if (n.widget == .scroll and axis == .vertical) {
+                    pos -= n.widget.scroll.offset_y;
+                }
                 for (n.children) |child| {
                     const s = child.measured;
                     var cross_off: f32 = 0;
@@ -317,8 +343,19 @@ pub const Tree = struct {
                         .{ .x = cross0 + cross_off, .y = pos, .w = cross_size, .h = main_size };
                     t.arrange(child, child_rect);
                     pos += main_size + st.gap;
+                    content_extent += main_size + st.gap;
                 }
+                if (n.children.len > 0) content_extent -= st.gap;
             },
+        }
+
+        // 滚动容器（§6）：刷新内容总高并钳制偏移（防 resize 后越界）。
+        if (n.widget == .scroll and n.layout == .column) {
+            const d = &n.widget.scroll;
+            d.content_h = @max(0, content_extent + pad.top + pad.bottom);
+            const viewport = @max(0, bound.h - pad.top - pad.bottom);
+            const max_off = @max(0, d.content_h - viewport);
+            if (d.offset_y > max_off) d.offset_y = max_off;
         }
     }
 
@@ -369,6 +406,9 @@ pub const Tree = struct {
             .pointer_up => |p| {
                 const hit = hitTest(t.root, p.pos);
                 if (t.active) |a| {
+                    // 拖拽型控件（slider 等，§6）：接管按下后，抬起通知与命中位置无关。
+                    const release_anywhere = a.release_anywhere;
+                    a.release_anywhere = false;
                     t.active = null;
                     a.invalidatePaint();
                     // 内建控件收尾（Edit 结束拖选）。
@@ -376,8 +416,8 @@ pub const Tree = struct {
                         if (dt.onEvent(t, a, e)) return true;
                     }
                     // click 语义（§5.8）：仅"按下与抬起同一节点"时才沿该节点冒泡，
-                    // 触发其 handler；否则视为拖动/误触，不派发。
-                    if (hit == a) return bubble(t, a, e);
+                    // 触发其 handler；否则视为拖动/误触，不派发。拖拽型控件除外。
+                    if (hit == a or release_anywhere) return bubble(t, a, e);
                 }
                 return false;
             },
@@ -397,6 +437,21 @@ pub const Tree = struct {
                     if (dt.onEvent(t, f, e)) return true;
                 }
                 return bubble(t, f, e);
+            },
+            .wheel => |w| {
+                // 滚轮（§6）：从命中节点向上找最近的 scroll 祖先，交给其事件处理；
+                // 内层 scroll 优先（命中处无 scroll 则交回冒泡，用户 handler 可选处理）。
+                const hit = hitTest(t.root, w.pos) orelse t.root;
+                var cur: ?*Node = hit;
+                while (cur) |c| {
+                    if (c.widget == .scroll) {
+                        if (t.dispatch_table) |dt| {
+                            if (dt.onEvent(t, c, e)) return true;
+                        }
+                    }
+                    cur = c.parent;
+                }
+                return bubble(t, hit, e);
             },
             .key_up => {
                 const f = t.focus orelse return false;
@@ -794,6 +849,36 @@ test "find by id" {
     try std.testing.expect(Tree.findIn(t.root, "a").? == n1);
     try std.testing.expect(Tree.findIn(t.root, "b").? == n2);
     try std.testing.expect(Tree.findIn(t.root, "zzz") == null);
+}
+
+test "paint culls children outside clip viewport (Scroll 剔除前提，§5.4)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    // 绝对定位 + 手填 rect：10 个带背景的 box，各 100 高，y 从 0 到 900。
+    // 背景由 paintNode 在 Node 层绘制（不依赖 dispatch），用 fillRect 次数观测剔除。
+    t.root.layout = .{ .none = {} };
+    for (0..10) |i| {
+        const n = try t.createNode(t.root);
+        n.style.bg = theme.light.accent;
+        n.rect = .{ .x = 0, .y = @as(f32, @floatFromInt(i * 100)), .w = 100, .h = 100 };
+        try t.appendChild(t.root, n);
+    }
+    t.ensureLayout(.{ .width = 100, .height = 300 }); // 视口 100×300。
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+    mp.clip_rect = .{ .w = 100, .h = 300 }; // 有效裁剪区 = 视口。
+    t.paint(mp.ctx);
+
+    var bg_fills: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect) bg_fills += 1;
+    }
+    // 仅视口内（y ∈ [0,300)，第 3 个贴 300 边界被剔除）3 个子节点被绘制。
+    try std.testing.expectEqual(@as(usize, 3), bg_fills);
 }
 
 test "invalidateMeasure walks ancestors" {

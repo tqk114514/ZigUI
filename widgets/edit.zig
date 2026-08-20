@@ -4,7 +4,9 @@
 //!   normal ↔ has_selection ↔ composing(IME)
 //! - buf 始终合法 UTF-8；caret/anchor 只落在码点边界（core/utf8 步进，禁裸 +1）；
 //! - composing 期间 buf 与 caret 冻结；组合串显示在 caret 处（下划线）；
-//! - 组合提交合并为一步 undo；TODO(M6)：undo 栈待交付；
+//! - 组合提交合并为一步 undo（M6：buf 快照式 undo/redo 栈，arena 切片引用）；
+//! - 拖选越界（Edit 在 scroll 容器内）自动滚动（§6 DoD）；
+//! - hover 视觉：背景取 bg_hover（类似 checkbox，§6）；
 //! - 视觉只取 theme token（L9）。
 //!
 //! 帧路径（measure/paint）零分配：composing 显示 = buf + 组合串分开 layout 绘制，
@@ -18,11 +20,15 @@ const node = @import("../core/node.zig");
 const painter = @import("../core/painter.zig");
 const widget = @import("../core/widget.zig");
 const event = @import("../core/event.zig");
+const scroll_mod = @import("scroll.zig");
 const theme = @import("../theme.zig");
 
 const pad_h: f32 = widget.Edit.pad_h;
 const pad_v: f32 = widget.Edit.pad_v;
 const caret_w: f32 = 1.5;
+
+/// undo 栈上限（§4.3：arena 单调增长评估见 §9；超过丢弃最旧）。
+const UNDO_MAX: usize = 100;
 
 /// 固有尺寸：单行，高度 = 行高 + 上下 padding；宽度倾向占满（stretch）。
 pub fn measure(tree: *node.Tree, d: widget.Edit, c: layout.Constraints) geo.Size {
@@ -49,8 +55,10 @@ pub fn measure(tree: *node.Tree, d: widget.Edit, c: layout.Constraints) geo.Size
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Edit) void {
     const th = tree.theme_ref;
     const focus = tree.focus == n;
+    const hover = tree.hover == n;
 
-    pc.fillRect(n.rect, th.bg_surface);
+    // 背景：悬停取 bg_hover（类似 checkbox，§6）；聚焦边框 accent。
+    pc.fillRect(n.rect, if (hover) th.bg_hover else th.bg_surface);
     pc.strokeRect(n.rect, if (focus) th.accent else th.border, 1, th.radius.small);
 
     const ts = tree.text_system orelse return;
@@ -136,6 +144,11 @@ fn handlePointerDown(tree: *node.Tree, n: *node.Node, d: *widget.Edit, p: event.
 
 fn handlePointerMove(tree: *node.Tree, n: *node.Node, d: *widget.Edit, p: event.Pointer) bool {
     if (!d.dragging) return false; // 非拖选不处理（事件继续冒泡）。
+    // 拖选越界自动滚动（§6 DoD）：指针超出 scroll 视口时向对应方向滚动。
+    if (scroll_mod.autoScrollOnDrag(n, p.pos.y)) {
+        // 已滚动：本轮坐标基于旧 rect，caret 下一轮修正；仍需按当前 x 更新。
+        n.invalidatePaint();
+    }
     const x = p.pos.x - n.rect.x - pad_h;
     d.caret = caretAtX(tree, d, x);
     n.invalidatePaint();
@@ -231,7 +244,7 @@ fn isWordChar(buf: []const u8, pos: usize) bool {
 
 fn handleKey(tree: *node.Tree, n: *node.Node, d: *widget.Edit, k: event.Key) bool {
     if (d.composing) return true; // 组合中：方向键选候选等交给 IME，不移动 caret。
-    if ((k.mods & event.Mod.control) != 0) return handleShortcut(tree, n, d, k.vk);
+    if ((k.mods & event.Mod.control) != 0) return handleShortcut(tree, n, d, k);
     const shift = (k.mods & event.Mod.shift) != 0;
     switch (k.vk) {
         event.VK.LEFT => moveCaret(d, shift, -1),
@@ -247,13 +260,22 @@ fn handleKey(tree: *node.Tree, n: *node.Node, d: *widget.Edit, k: event.Key) boo
     return true;
 }
 
-/// Ctrl 快捷键：A 全选 / C/V/X 剪贴板（§5.11，经 tree.clipboard 接口）。
-fn handleShortcut(tree: *node.Tree, n: *node.Node, d: *widget.Edit, vk: u32) bool {
-    switch (vk) {
+/// Ctrl 快捷键：A 全选 / C/V/X 剪贴板 / Z 撤销 / Y 重做（§5.11，经 tree.clipboard 接口）。
+fn handleShortcut(tree: *node.Tree, n: *node.Node, d: *widget.Edit, k: event.Key) bool {
+    const shift = (k.mods & event.Mod.shift) != 0;
+    switch (k.vk) {
         0x41 => selectAll(d), // A：全选
         0x43 => copySelection(tree, d), // C
         0x56 => pasteClipboard(tree, d), // V
         0x58 => cutSelection(tree, d), // X
+        0x5A => { // Z：撤销；Shift+Z：重做。
+            if (shift) {
+                _ = redoEdit(tree, d);
+            } else {
+                _ = undoEdit(tree, d);
+            }
+        },
+        0x59 => _ = redoEdit(tree, d), // Y：重做。
         else => return false, // 其他 Ctrl 组合冒泡。
     }
     n.invalidatePaint();
@@ -277,6 +299,7 @@ fn copySelection(tree: *node.Tree, d: *widget.Edit) void {
 fn cutSelection(tree: *node.Tree, d: *widget.Edit) void {
     copySelection(tree, d);
     if (!d.hasSelection()) return;
+    pushUndo(tree, d);
     const caret = deleteSelection(tree, d);
     d.caret = caret;
     d.anchor = caret;
@@ -304,12 +327,14 @@ fn moveCaretAbs(d: *widget.Edit, shift: bool, pos: usize) void {
 
 fn backspace(tree: *node.Tree, d: *widget.Edit) void {
     if (d.hasSelection()) {
+        pushUndo(tree, d);
         const caret = deleteSelection(tree, d);
         d.caret = caret;
         d.anchor = caret;
         return;
     }
     if (d.caret == 0) return;
+    pushUndo(tree, d);
     const prev = utf8.prevCodepoint(d.buf, d.caret);
     d.buf = concatSlice(tree, d.buf[0..prev], d.buf[d.caret..]) orelse return;
     d.caret = @intCast(prev);
@@ -318,12 +343,14 @@ fn backspace(tree: *node.Tree, d: *widget.Edit) void {
 
 fn deleteForward(tree: *node.Tree, d: *widget.Edit) void {
     if (d.hasSelection()) {
+        pushUndo(tree, d);
         const caret = deleteSelection(tree, d);
         d.caret = caret;
         d.anchor = caret;
         return;
     }
     if (d.caret >= d.buf.len) return;
+    pushUndo(tree, d);
     const next = utf8.nextCodepoint(d.buf, d.caret);
     d.buf = concatSlice(tree, d.buf[0..d.caret], d.buf[next..]) orelse return;
     d.anchor = d.caret;
@@ -342,13 +369,13 @@ fn deleteSelection(tree: *node.Tree, d: *widget.Edit) u32 {
 
 fn insertText(tree: *node.Tree, d: *widget.Edit, text: []const u8) void {
     if (text.len == 0) return;
+    pushUndo(tree, d); // 组合提交也在此（composing 期间 buf 冻结 → 整组合 = 一步 undo）。
     const caret = deleteSelection(tree, d);
     const mid = d.buf[caret..];
     const new = concat3(tree, d.buf[0..caret], text, mid) orelse return;
     d.buf = new;
     d.caret = caret + @as(u32, @intCast(text.len));
     d.anchor = d.caret;
-    // 组合提交本应合并为一步 undo；TODO(M6)：暂未实现，此处仅退出 composing。
     d.composing = false;
     d.compose_text = "";
 }
@@ -365,6 +392,40 @@ fn updateCompose(tree: *node.Tree, d: *widget.Edit, text: []const u8) void {
 }
 
 // —— 辅助 ——
+
+/// undo/redo 栈（M6，§5.8 组合提交合并为一步 undo）。
+/// 编辑前记录 buf 快照 = arena 切片引用（旧 buf 在 arena 天然存活，O(1)/条）；
+/// 清空 redo；超上限丢弃最旧（arena 语义：旧缓冲仍存活，仅不再可撤销）。
+fn pushUndo(tree: *node.Tree, d: *widget.Edit) void {
+    d.redo.clearRetainingCapacity();
+    d.undo.append(tree.arena.allocator(), d.buf) catch return;
+    if (d.undo.items.len > UNDO_MAX) {
+        std.mem.copyForwards([]const u8, d.undo.items[0 .. d.undo.items.len - 1], d.undo.items[1..]);
+        _ = d.undo.pop();
+    }
+}
+
+/// Ctrl+Z：撤销一步。恢复 buf，caret 置末尾。无可撤销返回 false。
+fn undoEdit(tree: *node.Tree, d: *widget.Edit) bool {
+    if (d.undo.items.len == 0) return false;
+    const prev = d.undo.pop().?;
+    d.redo.append(tree.arena.allocator(), d.buf) catch return true;
+    d.buf = prev;
+    d.caret = @intCast(d.buf.len);
+    d.anchor = d.caret;
+    return true;
+}
+
+/// Ctrl+Y / Ctrl+Shift+Z：重做一步。无可重做返回 false。
+fn redoEdit(tree: *node.Tree, d: *widget.Edit) bool {
+    if (d.redo.items.len == 0) return false;
+    const next = d.redo.pop().?;
+    d.undo.append(tree.arena.allocator(), d.buf) catch return true;
+    d.buf = next;
+    d.caret = @intCast(d.buf.len);
+    d.anchor = d.caret;
+    return true;
+}
 
 /// buf[0..pos] 的布局宽度（caret / 选区定位用）。零分配，走缓存（L4）。
 /// 用含尾随空白宽度：光标紧跟空格时位置正确（§5.8）。
@@ -547,4 +608,104 @@ test "edit: composing freezes buf and caret" {
     insertText(&t, &e, "好");
     try std.testing.expect(!e.composing);
     try std.testing.expectEqualStrings("ab好", e.buf);
+}
+
+test "edit: undo and redo restore buf snapshots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    var e = widget.Edit{};
+    insertText(&t, &e, "hello");
+    insertText(&t, &e, " world");
+    try std.testing.expectEqualStrings("hello world", e.buf);
+
+    // 撤销两次回到初始。
+    try std.testing.expect(undoEdit(&t, &e));
+    try std.testing.expectEqualStrings("hello", e.buf);
+    try std.testing.expect(undoEdit(&t, &e));
+    try std.testing.expectEqualStrings("", e.buf);
+    try std.testing.expect(!undoEdit(&t, &e)); // 无更多可撤销。
+
+    // 重做两次回到最新。
+    try std.testing.expect(redoEdit(&t, &e));
+    try std.testing.expectEqualStrings("hello", e.buf);
+    try std.testing.expect(redoEdit(&t, &e));
+    try std.testing.expectEqualStrings("hello world", e.buf);
+    try std.testing.expect(!redoEdit(&t, &e));
+
+    // 撤销后新编辑清空 redo。
+    _ = undoEdit(&t, &e);
+    insertText(&t, &e, "!");
+    try std.testing.expectEqualStrings("hello!", e.buf);
+    try std.testing.expect(!redoEdit(&t, &e));
+}
+
+test "edit: composition commit is one undo step" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    var e = widget.Edit{};
+    insertText(&t, &e, "ab"); // undo: [""]
+    updateCompose(&t, &e, "nihao"); // composing 中 buf 冻结，无快照。
+    insertText(&t, &e, "好"); // 提交合并为一步：undo ["", "ab"]。
+    try std.testing.expectEqualStrings("ab好", e.buf);
+    try std.testing.expectEqual(@as(usize, 2), e.undo.items.len);
+
+    try std.testing.expect(undoEdit(&t, &e)); // 撤销整组合提交。
+    try std.testing.expectEqualStrings("ab", e.buf);
+    try std.testing.expect(undoEdit(&t, &e)); // 撤销打字。
+    try std.testing.expectEqualStrings("", e.buf);
+}
+
+test "edit: backspace/delete/cut are undoable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    var e = widget.Edit{};
+    insertText(&t, &e, "abc");
+    e.caret = 3;
+    backspace(&t, &e); // "ab"
+    try std.testing.expectEqualStrings("ab", e.buf);
+    try std.testing.expect(undoEdit(&t, &e));
+    try std.testing.expectEqualStrings("abc", e.buf);
+
+    // deleteForward 在末尾：无变化，不压栈。
+    e.caret = 3;
+    deleteForward(&t, &e);
+    try std.testing.expectEqualStrings("abc", e.buf);
+
+    // cut 有选区：删除并压栈（剪贴板未装配时只删不写）。
+    e.anchor = 0;
+    e.caret = 3;
+    cutSelection(&t, &e);
+    try std.testing.expectEqualStrings("", e.buf);
+    try std.testing.expect(undoEdit(&t, &e));
+    try std.testing.expectEqualStrings("abc", e.buf);
+}
+
+test "edit: hover uses bg_hover on background (MockPainter)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    const n = try t.createNode(t.root);
+    n.widget = .{ .edit = .{ .buf = "x" } };
+    n.rect = .{ .x = 0, .y = 0, .w = 100, .h = 24 };
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+
+    // 无 hover：背景 bg_surface。
+    paint(&t, mp.ctx, n, n.widget.edit);
+    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_surface.r);
+
+    // hover：背景 bg_hover。
+    mp.reset();
+    t.hover = n;
+    paint(&t, mp.ctx, n, n.widget.edit);
+    try std.testing.expect(mp.calls.items[0].fillRect.color.r == theme.light.bg_hover.r);
 }

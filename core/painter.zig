@@ -86,6 +86,8 @@ pub const MockPainter = struct {
     calls: std.ArrayListUnmanaged(Call) = .empty,
     allocator: std.mem.Allocator,
     ctx: PaintCtx = undefined,
+    /// 可选有效裁剪区：非 null 时 clipIntersects 按其判定（测试 Scroll 剔除，§5.4）。
+    clip_rect: ?geo.Rect = null,
 
     pub const Call = union(enum) {
         fillRect: struct { rect: geo.Rect, color: theme.Color },
@@ -144,9 +146,9 @@ pub const MockPainter = struct {
         s.calls.append(s.allocator, .popClip) catch unreachable;
     }
     fn implClipIntersects(impl: *anyopaque, rect: geo.Rect) bool {
-        _ = impl;
-        _ = rect;
-        return true; // Mock 默认不剔除；测试可覆盖。
+        const s: *MockPainter = @ptrCast(@alignCast(impl));
+        if (s.clip_rect) |c| return c.intersects(rect);
+        return true; // Mock 默认不剔除；测试可设 clip_rect。
     }
 };
 

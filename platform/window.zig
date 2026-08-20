@@ -422,6 +422,18 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
             }
             return 0;
         },
+        // —— WM_MOUSEWHEEL：滚轮（§6）→ Wheel 事件 → tree.dispatch ——
+        w32.windows_and_messaging.WM_MOUSEWHEEL => {
+            if (ctx != null) {
+                const scale = ctx.?.device.?.dpi_scale;
+                if (input_mod.wheelEvent(hwnd, w_param, l_param, scale)) |ev| {
+                    var e = ev;
+                    _ = ctx.?.tree.dispatch(&e);
+                    _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                }
+            }
+            return 0;
+        },
         // —— WM_KEYDOWN/UP：input.zig；Tab 走焦点链，其余给 focus 节点 ——
         w32.windows_and_messaging.WM_KEYDOWN,
         w32.windows_and_messaging.WM_KEYUP,

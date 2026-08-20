@@ -87,7 +87,8 @@ pub const Ime = struct {
 
         const l: u32 = @truncate(@as(u64, @bitCast(l_param)));
         if ((l & @as(u32, @bitCast(ime_ns.GCS_RESULTSTR))) != 0) {
-            // 组合提交（§5.8：应合并为一步 undo；TODO(M6)：当前直接作为 text_input 提交）。
+            // 组合提交（§5.8）：作为 text_input 派发；composing 期间 buf 冻结，
+            // Edit.insertText 将其合并为一步 undo（§6）。
             return if (readString(hime, ime_ns.GCS_RESULTSTR, allocator)) |s|
                 .{ .text_input = .{ .text = s } }
             else

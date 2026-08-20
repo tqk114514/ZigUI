@@ -14,6 +14,9 @@ const painter = @import("../core/painter.zig");
 const text = @import("text.zig");
 const button = @import("button.zig");
 const edit = @import("edit.zig");
+const scroll = @import("scroll.zig");
+const check = @import("check.zig");
+const slider = @import("slider.zig");
 const event = @import("../core/event.zig");
 
 /// 供 Tree 引用的分发表实例。
@@ -31,7 +34,9 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
         .text => |d| text.measure(tree, d, c),
         .button => |d| button.measure(tree, d, c),
         .edit => |d| edit.measure(tree, d, c),
-        .scroll => .{}, // TODO(M6)：scroll 待交付
+        .checkbox => |d| check.measure(tree, d, c),
+        .slider => |d| slider.measure(tree, d, c),
+        .scroll => .{}, // scroll 是布局容器，走 computeSize 的 else 分支，不经此路由
         .custom => unreachable, // custom 走自身 vtable，不经此路由
     };
 }
@@ -43,15 +48,21 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
         .text => |d| text.paint(tree, pc, n.rect, d),
         .button => |d| button.paint(tree, pc, n, d),
         .edit => |d| edit.paint(tree, pc, n, d),
-        .scroll => {},
+        .checkbox => |d| check.paint(tree, pc, n, d),
+        .slider => |d| slider.paint(tree, pc, n, d),
+        .scroll => {}, // scroll 由 paintNode 的 clip/递归处理内容
         .custom => {},
     }
 }
 
-/// 内建控件事件处理（§5.4/§5.8）：Edit 键盘/文本/IME。返回 true = 已消费。
+/// 内建控件事件处理（§5.4/§5.8）：Edit 键盘/文本/IME、checkbox/slider/scroll 交互。
+/// 返回 true = 已消费。
 fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
     return switch (n.widget) {
         .edit => edit.onEvent(tree, n, e),
+        .checkbox => check.onEvent(tree, n, e),
+        .slider => slider.onEvent(tree, n, e),
+        .scroll => scroll.onEvent(tree, n, e),
         else => false, // 非内建事件控件：不消费，交回 bubble（用户 handler）。
     };
 }
@@ -69,4 +80,63 @@ test "dispatch table routes text measure" {
     const s = measureWidget(&t, n, .{ .max = .{ .width = 1000, .height = 1000 } });
     // 无 text_system 时按零尺寸（文本能力由 render 注入）。
     try std.testing.expect(geo.approxEq(0, s.width));
+}
+
+test "checkbox/slider get non-zero size via computeSize (回归：曾被当容器测得 0)" {
+    const theme = @import("../theme.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    t.dispatch_table = &table;
+    t.root.layout = .{ .column = .{} };
+
+    const cb = try t.createNode(t.root);
+    cb.widget = .{ .checkbox = .{ .label = "x" } };
+    try t.appendChild(t.root, cb);
+    const sl = try t.createNode(t.root);
+    sl.widget = .{ .slider = .{} };
+    try t.appendChild(t.root, sl);
+
+    t.ensureLayout(.{ .width = 200, .height = 400 });
+    // 叶子控件必须测得固有高度（checkbox ≥ 框高，slider = 控件高），且上下排布不重叠。
+    try std.testing.expect(cb.measured.height > 0);
+    try std.testing.expect(sl.measured.height > 0);
+    try std.testing.expect(cb.rect.y < sl.rect.y);
+}
+
+test "slider drag end notifies handler even when released off-node (§6)" {
+    const theme = @import("../theme.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try node.Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    t.dispatch_table = &table;
+    t.root.layout = .{ .column = .{} };
+
+    const sl = try t.createNode(t.root);
+    sl.widget = .{ .slider = .{ .value = 0, .min = 0, .max = 100 } };
+    try t.appendChild(t.root, sl);
+    t.ensureLayout(.{ .width = 200, .height = 100 }); // 滑块 rect = (0,0,200,20)。
+
+    var notified: u32 = 0;
+    sl.handler_ctx = &notified;
+    sl.handler = &struct {
+        fn h(_: *node.Node, c: ?*anyopaque, e: *const event.Event) bool {
+            if (e.* == .pointer_up) {
+                const n: *u32 = @ptrCast(@alignCast(c.?));
+                n.* += 1;
+            }
+            return false;
+        }
+    }.h;
+
+    // 滑块上按下 → 拖动到最右 → 抬起到滑块外（y 超界）。
+    // 滑块宽 200、thumb 14 → 行程 186，中心范围 [7,193]。
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 100, .y = 10 } } });
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 193, .y = 10 } } });
+    try std.testing.expect(geo.approxEq(100, sl.widget.slider.value));
+    _ = t.dispatch(&.{ .pointer_up = .{ .pos = .{ .x = 193, .y = 90 } } });
+    // 拖动结束必须通知 handler（拖拽型控件，与抬起位置无关，§6）。
+    try std.testing.expectEqual(@as(u32, 1), notified);
 }

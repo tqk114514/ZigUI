@@ -78,6 +78,15 @@ pub const Rect = struct {
         return self.x < o.x + o.w and o.x < self.x + self.w and
             self.y < o.y + o.h and o.y < self.y + self.h;
     }
+
+    /// 与另一矩形的交集（可能为空矩形，尺寸夹到 ≥0）。裁剪栈逐层缩小用（§5.4）。
+    pub fn intersection(self: Rect, o: Rect) Rect {
+        const l = @max(self.x, o.x);
+        const t = @max(self.y, o.y);
+        const r = @min(self.x + self.w, o.x + o.w);
+        const b = @min(self.y + self.h, o.y + o.h);
+        return .{ .x = l, .y = t, .w = @max(0, r - l), .h = @max(0, b - t) };
+    }
 };
 
 /// DIP → 物理像素取整：四舍五入、负数对称（规则 §4.4）。
@@ -133,6 +142,18 @@ test "rect intersects" {
     // 边界相触视为相交（0 面积重叠）。
     const touch = Rect{ .x = 10, .y = 0, .w = 5, .h = 5 };
     try std.testing.expect(!a.intersects(touch));
+}
+
+test "rect intersection narrows to overlap" {
+    const a = Rect{ .x = 0, .y = 0, .w = 100, .h = 100 };
+    const b = Rect{ .x = 50, .y = 50, .w = 100, .h = 100 };
+    const i = a.intersection(b);
+    try std.testing.expect(approxEq(i.x, 50) and approxEq(i.y, 50));
+    try std.testing.expect(approxEq(i.w, 50) and approxEq(i.h, 50));
+    // 不相交 → 空矩形（尺寸 0）。
+    const c = Rect{ .x = 200, .y = 0, .w = 10, .h = 10 };
+    const e = a.intersection(c);
+    try std.testing.expect(e.w == 0 or e.h == 0);
 }
 
 test "snap rounds negative symmetric" {

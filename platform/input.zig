@@ -52,6 +52,22 @@ pub fn keyEvent(u_msg: u32, w_param: w32.WPARAM) ?event.Event {
     };
 }
 
+/// 由 WM_MOUSEWHEEL 构造 Wheel 事件（§6）。
+/// lParam = 鼠标屏幕坐标（物理像素）→ ScreenToClient → DIP；
+/// wParam 高 16 位 = delta（±120/档）。Windows 约定：滚轮向上（delta>0）看向文档
+/// 开头 → offset 减小，故取反为行数：−delta/120 × 3（正 = 视口向末尾，offset 增大）。
+pub fn wheelEvent(hwnd: w32.HWND, w_param: w32.WPARAM, l_param: w32.LPARAM, scale: f32) ?event.Event {
+    const sx: i16 = @bitCast(@as(u16, @truncate(@as(u64, @bitCast(l_param)))));
+    const sy: i16 = @bitCast(@as(u16, @truncate(@as(u64, @bitCast(l_param)) >> 16)));
+    var pt = w32.POINT{ .x = sx, .y = sy };
+    _ = w32.user32.ScreenToClient(hwnd, &pt);
+    const delta: i16 = @bitCast(@as(u16, @truncate(@as(u64, @bitCast(w_param)) >> 16)));
+    return .{ .wheel = .{
+        .pos = .{ .x = @as(f32, @floatFromInt(pt.x)) / scale, .y = @as(f32, @floatFromInt(pt.y)) / scale },
+        .lines = -@as(f32, @floatFromInt(delta)) / 120.0 * 3.0,
+    } };
+}
+
 /// 读取当前修饰键状态。
 fn readMods() u32 {
     var m: u32 = 0;

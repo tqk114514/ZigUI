@@ -69,6 +69,7 @@ const M0_EXAMPLES = [_][]const u8{
     "text",
     "bench",
     "edit",
+    "gallery",
 };
 
 /// zig-win32 只提供声明；系统库的链接在 Zig 0.16 中位于 Module 层（规则 §5.9

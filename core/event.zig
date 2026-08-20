@@ -65,6 +65,16 @@ pub const ImeCompose = struct {
     text: []const u8 = "",
 };
 
+/// 滚轮事件载荷（§6）：鼠标位置 + 滚动行数。
+pub const Wheel = struct {
+    /// 鼠标位置（窗口 DIP），用于定位目标（hit test）。
+    pos: geo.Point = .{},
+    /// 滚动行数（f32 以兼容高精度触控板增量）。**正 = 视口向文档末尾（offset 增大）**，
+    /// 负 = 向文档开头（offset 减小）。WM_MOUSEWHEEL 归一化：−delta/120 × 3
+    /// （Windows 约定：滚轮向上 delta>0 → 负，即向开头）。
+    lines: f32 = 0,
+};
+
 /// 事件联合。新增事件类型时，node.dispatch 的 switch 必须穷尽（编译器强制）。
 pub const Event = union(enum) {
     pointer_down: Pointer,
@@ -75,6 +85,8 @@ pub const Event = union(enum) {
     text_input: TextInput,
     /// IME 组合串变化（§5.10）。
     ime_compose: ImeCompose,
+    /// 滚轮滚动（§6）。
+    wheel: Wheel,
     focus_gained,
     focus_lost,
     custom: u32,

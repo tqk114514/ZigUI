@@ -30,6 +30,9 @@ const ENTRY_BASE_BYTES: usize = 4096;
 /// 每 UTF-8 字节的估算开销（UTF-16 转换 + shaping 结构，粗估）。
 const TEXT_BYTES_PER_CHAR: usize = 64;
 
+/// 缓存键栈缓冲容量：覆盖常见短文本键（帧路径零分配，L4）；超长才走堆。
+const KEY_STACK_CAP: usize = 256;
+
 /// 粗估条目内存（缓存治理用，无需精确）。
 fn entrySize(text_len: usize) usize {
     return ENTRY_BASE_BYTES + text_len * TEXT_BYTES_PER_CHAR;
@@ -90,17 +93,24 @@ pub const TextSystemImpl = struct {
     };
 
     pub fn layout(self: *TextSystemImpl, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) ?*painter.TextLayout {
-        const key = cacheKey(self.allocator, text, font, max_width, options) catch return null;
-        // 命中：移链表头（LRU 保序），释放临时键。
-        if (self.layout_map.get(key)) |node| {
+        // 键优先写入栈缓冲：measure/paint 是帧路径（L4），缓存命中零分配。
+        var stack_key: [KEY_STACK_CAP]u8 = undefined;
+        const key = cacheKey(&stack_key, self.allocator, text, font, max_width, options) catch return null;
+        // 命中：移链表头（LRU 保序），释放临时堆键（栈键无需释放）。
+        if (self.layout_map.get(key.data)) |node| {
             self.hits += 1;
-            self.allocator.free(key);
+            if (key.heap) self.allocator.free(key.data);
             self.moveToHead(node);
             return &node.entry.tl;
         }
         self.misses += 1;
-        const tl = self.createAndCache(key, text, font, max_width, options) catch {
-            self.allocator.free(key);
+        // miss：需要持久键。栈键拷贝入堆；堆键直接转交（缓存持有）。
+        const persist: []const u8 = if (key.heap)
+            key.data
+        else
+            (self.allocator.dupe(u8, key.data) catch return null);
+        const tl = self.createAndCache(persist, text, font, max_width, options) catch {
+            self.allocator.free(persist);
             return null;
         };
         self.logStatsMaybe();
@@ -311,28 +321,49 @@ fn fontWeight(w: theme.Weight) dw.DWRITE_FONT_WEIGHT {
     };
 }
 
+/// 缓存键描述：data 可能指向调用方栈缓冲或堆；heap=true 需释放。
+const CacheKey = struct {
+    data: []const u8,
+    heap: bool,
+};
+
 /// TextLayout 缓存键：文本 + 字族 + 字号位 + 字重 + 宽度位 + wrap/ellipsis。
 /// 单行且不省略时 max_width 不影响 bounds，键不依赖它（拖拽 resize 时保持命中）。
+/// 优先写入调用方栈缓冲（帧路径零分配，L4），超长才走堆。
 /// 独立函数便于单测（不依赖 DWrite）。
-fn cacheKey(allocator: std.mem.Allocator, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) ![]const u8 {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(allocator);
-    try buf.appendSlice(allocator, text);
-    try buf.appendSlice(allocator, "|");
-    try buf.appendSlice(allocator, font.family);
-    try buf.appendSlice(allocator, "|");
-    const fs: u32 = @bitCast(font.size);
-    const mw: u32 = @bitCast(if (options.wrap or options.ellipsis) max_width else 0);
+fn cacheKey(buf: *[KEY_STACK_CAP]u8, allocator: std.mem.Allocator, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) !CacheKey {
     var tmp: [96]u8 = undefined;
     const suffix = try std.fmt.bufPrint(&tmp, "{d}|{d}|{x}|{d}|{d}", .{
         @intFromEnum(font.weight),
-        fs,
-        mw,
+        @as(u32, @bitCast(font.size)),
+        @as(u32, @bitCast(if (options.wrap or options.ellipsis) max_width else 0)),
         @intFromBool(options.wrap),
         @intFromBool(options.ellipsis),
     });
-    try buf.appendSlice(allocator, suffix);
-    return buf.toOwnedSlice(allocator);
+    const total = text.len + 1 + font.family.len + 1 + suffix.len;
+    if (total <= KEY_STACK_CAP) {
+        var w: usize = 0;
+        @memcpy(buf[0..text.len], text);
+        w += text.len;
+        buf[w] = '|';
+        w += 1;
+        @memcpy(buf[w .. w + font.family.len], font.family);
+        w += font.family.len;
+        buf[w] = '|';
+        w += 1;
+        @memcpy(buf[w .. w + suffix.len], suffix);
+        w += suffix.len;
+        return .{ .data = buf[0..w], .heap = false };
+    }
+    // 超长回退：堆构建（调用方/缓存负责释放）。
+    var list = std.ArrayListUnmanaged(u8).empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, text);
+    try list.append(allocator, '|');
+    try list.appendSlice(allocator, font.family);
+    try list.append(allocator, '|');
+    try list.appendSlice(allocator, suffix);
+    return .{ .data = try list.toOwnedSlice(allocator), .heap = true };
 }
 
 /// TextFormat 缓存键：字族 + 字号位 + 字重（不含 wrap/ellipsis——layout 级覆盖）。
@@ -369,30 +400,33 @@ test "text weight mapping" {
 
 test "text layout cache key: single-line ignores width; wrap/ellipsis sensitive" {
     const f = theme.Font{ .family = "Consolas", .size = 13.0, .weight = .regular };
+    // 每个键独立栈缓冲（共享缓冲会互相覆盖）。
+    var b1: [KEY_STACK_CAP]u8 = undefined;
+    var b2: [KEY_STACK_CAP]u8 = undefined;
+    var b3: [KEY_STACK_CAP]u8 = undefined;
+    var b4: [KEY_STACK_CAP]u8 = undefined;
+    var b5: [KEY_STACK_CAP]u8 = undefined;
+    var b6: [KEY_STACK_CAP]u8 = undefined;
     // 单行（无 wrap/ellipsis）：max_width 不影响 bounds → 键与宽度无关（resize 命中）。
-    const k1 = try cacheKey(std.testing.allocator, "abc", &f, 100, .{});
-    defer std.testing.allocator.free(k1);
-    const k2 = try cacheKey(std.testing.allocator, "abc", &f, 200, .{});
-    defer std.testing.allocator.free(k2);
-    try std.testing.expect(std.mem.eql(u8, k1, k2));
+    const k1 = try cacheKey(&b1, std.testing.allocator, "abc", &f, 100, .{});
+    const k2 = try cacheKey(&b2, std.testing.allocator, "abc", &f, 200, .{});
+    try std.testing.expect(std.mem.eql(u8, k1.data, k2.data));
+    // 短文本走栈缓冲（帧路径零分配）。
+    try std.testing.expect(!k1.heap);
 
     // wrap：宽度敏感。
-    const k3 = try cacheKey(std.testing.allocator, "abc", &f, 100, .{ .wrap = true });
-    defer std.testing.allocator.free(k3);
-    const k4 = try cacheKey(std.testing.allocator, "abc", &f, 200, .{ .wrap = true });
-    defer std.testing.allocator.free(k4);
-    try std.testing.expect(!std.mem.eql(u8, k3, k4));
-    try std.testing.expect(!std.mem.eql(u8, k1, k3)); // wrap 不同 → 键不同
+    const k3 = try cacheKey(&b3, std.testing.allocator, "abc", &f, 100, .{ .wrap = true });
+    const k4 = try cacheKey(&b4, std.testing.allocator, "abc", &f, 200, .{ .wrap = true });
+    try std.testing.expect(!std.mem.eql(u8, k3.data, k4.data));
+    try std.testing.expect(!std.mem.eql(u8, k1.data, k3.data)); // wrap 不同 → 键不同
 
     // ellipsis：宽度敏感且与单行不同。
-    const k5 = try cacheKey(std.testing.allocator, "abc", &f, 100, .{ .ellipsis = true });
-    defer std.testing.allocator.free(k5);
-    try std.testing.expect(!std.mem.eql(u8, k1, k5));
+    const k5 = try cacheKey(&b5, std.testing.allocator, "abc", &f, 100, .{ .ellipsis = true });
+    try std.testing.expect(!std.mem.eql(u8, k1.data, k5.data));
 
     // 文本不同 → 键不同。
-    const k6 = try cacheKey(std.testing.allocator, "abd", &f, 100, .{});
-    defer std.testing.allocator.free(k6);
-    try std.testing.expect(!std.mem.eql(u8, k1, k6));
+    const k6 = try cacheKey(&b6, std.testing.allocator, "abd", &f, 100, .{});
+    try std.testing.expect(!std.mem.eql(u8, k1.data, k6.data));
 }
 
 test "text format cache key ignores wrap/ellipsis" {

@@ -19,6 +19,12 @@ const text_mod = @import("text.zig");
 pub const D2DPainter = struct {
     device: *device_mod.Device,
 
+    /// 裁剪栈（DIP）：pushClip/popClip 同步维护，clipIntersects 据此剔除（§5.4
+    /// ScrollView 性能的前提）。有效裁剪区 = 栈内所有 clip 的交集；每帧 paint
+    /// push/pop 成对出现，帧末深度归零。
+    clip_stack: [128]geometry.Rect = undefined,
+    clip_depth: usize = 0,
+
     var vtable: painter.PaintCtx.VTable = .{
         .fillRect = implFillRect,
         .strokeRect = implStrokeRect,
@@ -90,6 +96,17 @@ pub const D2DPainter = struct {
 
     fn implPushClip(impl: *anyopaque, rect: geometry.Rect) void {
         const self = selfOf(impl);
+        // 与 D2D PushAxisAlignedClip 同步维护裁剪栈（DIP）。
+        if (self.clip_depth < self.clip_stack.len) {
+            // 新 clip = 当前有效裁剪区 ∩ rect（保留模式裁剪栈是逐层缩小）。
+            if (self.clip_depth == 0) {
+                self.clip_stack[0] = rect;
+            } else {
+                const cur = self.clip_stack[self.clip_depth - 1];
+                self.clip_stack[self.clip_depth] = cur.intersection(rect);
+            }
+            self.clip_depth += 1;
+        }
         const clip = toD2DRect(rect);
         self.device.rt.?.ID2D1RenderTarget.PushAxisAlignedClip(
             &clip,
@@ -99,15 +116,16 @@ pub const D2DPainter = struct {
 
     fn implPopClip(impl: *anyopaque) void {
         const self = selfOf(impl);
+        if (self.clip_depth > 0) self.clip_depth -= 1;
         self.device.rt.?.ID2D1RenderTarget.PopAxisAlignedClip();
     }
 
     fn implClipIntersects(impl: *anyopaque, rect: geometry.Rect) bool {
-        _ = impl;
-        _ = rect;
-        // 剔除在 WM_PAINT 剪裁区之外由 BeginDraw 的更新区域处理；
-        // 简化：全部绘制；TODO(M6)：Scroll 引入精确剔除。
-        return true;
+        const self = selfOf(impl);
+        // 无裁剪栈 → 整个窗口可见。
+        if (self.clip_depth == 0) return true;
+        // 与当前有效裁剪区相交即保留（含边界相触，§5.4 clipIntersects 剔除判定）。
+        return self.clip_stack[self.clip_depth - 1].intersects(rect);
     }
 
     fn brushFor(self: *D2DPainter, color: theme.Color) ?*d2d.ID2D1SolidColorBrush {

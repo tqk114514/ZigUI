@@ -5,7 +5,7 @@
 //! - 仅 re-export 公共 API，不在此实现逻辑；
 //! - core/ 不得 import 平台/渲染模块（L1），此处同样不触碰 win32。
 //!
-//! 现状：M5（Edit + IME + 剪贴板）。
+//! 现状：M6（Scroll + Checkbox + Slider + Edit undo/redo）。
 
 const std = @import("std");
 
@@ -31,6 +31,9 @@ pub const widgets = struct {
     pub const text = @import("widgets/text.zig");
     pub const button = @import("widgets/button.zig");
     pub const edit = @import("widgets/edit.zig");
+    pub const scroll = @import("widgets/scroll.zig");
+    pub const check = @import("widgets/check.zig");
+    pub const slider = @import("widgets/slider.zig");
     pub const builder = @import("widgets/builder.zig");
 };
 
@@ -75,6 +78,9 @@ test "collect all core module tests" {
     _ = @import("widgets/text.zig");
     _ = @import("widgets/button.zig");
     _ = @import("widgets/edit.zig");
+    _ = @import("widgets/scroll.zig");
+    _ = @import("widgets/check.zig");
+    _ = @import("widgets/slider.zig");
     _ = @import("render/cache.zig");
     _ = @import("render/text.zig");
     _ = @import("platform/input.zig");
