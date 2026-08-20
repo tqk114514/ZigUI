@@ -117,7 +117,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .hInstance = hinst,
         .hIcon = null,
         // 客户区默认箭头光标：鼠标从非客户区（边框）移入时，系统据 hCursor 恢复箭头，
-        // 避免残留边框拉伸光标（问题 2）。
+        // 避免残留边框拉伸光标。
         .hCursor = w32.user32.LoadCursorW(null, w32.windows_and_messaging.IDC_ARROW),
         .hbrBackground = bg_brush,
         .lpszMenuName = null,
@@ -331,7 +331,7 @@ fn toByte(c: f32) u8 {
     return @intFromFloat(@min(255.0, c * 255.0 + 0.5));
 }
 
-/// 窗口过程：M0 只负责退出与请求重绘。
+/// 窗口过程：消息归属见 §5.9，指针/键盘消息转 Event 后经 tree.dispatch。
 fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM) callconv(.winapi) w32.LRESULT {
     const ctx: ?*WindowCtx = @ptrFromInt(@as(usize, @bitCast(w32.user32.GetWindowLongPtrW(hwnd, .P_USERDATA))));
     switch (u_msg) {
@@ -475,12 +475,12 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_IME_SETCONTEXT => {
             if (ctx != null) reportImeCaret(ctx.?);
             // 不清除 ISC 标志（清除组合窗标志会联动抑制微软拼音候选框）：
-            // 组合窗隐藏靠 WM_IME_STARTCOMPOSITION 返回 0（§5.10 示例实测）。
+            // 组合窗隐藏靠 WM_IME_STARTCOMPOSITION 返回 0（§5.10）。
             return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
         },
         w32.windows_and_messaging.WM_IME_STARTCOMPOSITION => {
             if (ctx != null) reportImeCaret(ctx.?);
-            // 必须返回 0：示例实测——系统组合窗仅在 STARTCOMPOSITION 返回 0 时隐藏。
+            // 必须返回 0：系统组合窗仅在 STARTCOMPOSITION 返回 0 时隐藏（§5.10）。
             return 0;
         },
         w32.windows_and_messaging.WM_IME_ENDCOMPOSITION => {

@@ -5,11 +5,12 @@
 //! - 节点遍历（measure/arrange 的树操作）由 node.zig 编排，经本文件类型与辅助函数执行；
 //! - measure 只读 measured/children/style/layout，禁止读 rect；arrange 不得改 measured（§5.5）；
 //! - 子节点收到的约束必须是 loosen 过的（显式 stretch 例外）；
-//! - **传播终止**：重测结果与缓存一致时，不再向父级继续标脏（根节点整档稳定的前提）。
+//! - **传播终止**：重测结果与缓存一致时，不再向父级继续标脏（§5.5）。
 
 const std = @import("std");
 const geo = @import("geometry.zig");
 
+/// 断言容差：所有近似比较统一用它。
 pub const epsilon: f32 = 0.001;
 
 /// 未约束时的"无穷"上限（DIP）。用大有限值而非 f32::inf，避免 clamp 溢出。

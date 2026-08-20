@@ -6,12 +6,10 @@
 //!   TextLayout 按（文本+字体+宽度+wrap/ellipsis）LRU，内存预算按物理内存自适应（§5.6）；
 //! - wrap/ellipsis 在 TextLayout 级设置，不污染缓存的 TextFormat（避免键冲突）；
 //! - 缓存命中率经 debug 开关周期性输出（§8.5）；
-//! - 中文/拉丁 fallback 由 DWrite 系统字体集合自动处理（M2 DoD）。
+//! - 中文/拉丁 fallback 由 DWrite 系统字体集合自动处理。
 //!
-//! 设计注记（M7 稳定化）：本文件与 render/cache.zig（BrushCache）均为专用对象缓存。
-//! 后续图标/位图/Geometry 缓存将复用同一套治理（预算 + LRU + 逐出钩子），届时
-//! 提取通用对象缓存容器（泛型 Key→Entry），TextLayout/Brush/Bitmap 均以其为实例。
-//! 现在先做专用，避免过早抽象（§4 避免过度工程）。
+//! 设计注记：本文件与 render/cache.zig 均为专用对象缓存。
+//! TODO(M7)：提取通用对象缓存容器（泛型 Key→Entry），TextLayout/Brush/Bitmap 均以其为实例。
 
 const std = @import("std");
 const win32 = @import("../platform/win32.zig");
@@ -21,11 +19,8 @@ const theme = @import("../theme.zig");
 
 const log = std.log.scoped(.text);
 
-/// TextLayout 缓存预算（§5.6 有界缓存）。默认按系统物理内存比例自适应
-/// （业界 Chromium/WebKit 风格），而非固定值：大内存机器缓存自动变大。
-/// 注：上/下限是"防失控护栏"，不是性能目标——文本可见工作集仅数 MB，
-/// 128MB 已覆盖任何复杂 UI。精确比例与上限留待 M7 统一对象缓存容器时
-/// 一并评估调优（届时文本/位图/图标共用一套预算治理，此处不单独优化）。
+/// TextLayout 缓存预算（§5.6 有界缓存）：按物理内存比例自适应，
+/// 上/下限是防失控护栏。TODO(M7)：精确比例在统一对象缓存容器时一并调优。
 const DEFAULT_BUDGET_MIN: usize = 8 * 1024 * 1024; // 8MB 下限（小内存兜底）
 const DEFAULT_BUDGET_MAX: usize = 128 * 1024 * 1024; // 128MB 上限（防失控）
 /// 预算比例 = 物理内存 × 0.5%（1/200）。
@@ -317,7 +312,7 @@ fn fontWeight(w: theme.Weight) dw.DWRITE_FONT_WEIGHT {
 }
 
 /// TextLayout 缓存键：文本 + 字族 + 字号位 + 字重 + 宽度位 + wrap/ellipsis。
-/// 单行且不省略时 max_width 不影响 bounds，键不依赖它（拖拽 resize 时保持命中，M4）。
+/// 单行且不省略时 max_width 不影响 bounds，键不依赖它（拖拽 resize 时保持命中）。
 /// 独立函数便于单测（不依赖 DWrite）。
 fn cacheKey(allocator: std.mem.Allocator, text: []const u8, font: *const theme.Font, max_width: f32, options: painter.TextLayoutOptions) ![]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
@@ -353,7 +348,7 @@ fn formatKey(allocator: std.mem.Allocator, font: *const theme.Font) ![]const u8 
     return buf.toOwnedSlice(allocator);
 }
 
-// 供 Device 装配：把 TextSystemImpl 暴露为 core 的 TextSystem 接口。
+/// 装配为 core 的 TextSystem 接口（window.run 调用）。
 pub fn asTextSystem(impl: *TextSystemImpl) painter.TextSystem {
     return .{
         .vtable = &.{ .layout = &systemLayout },

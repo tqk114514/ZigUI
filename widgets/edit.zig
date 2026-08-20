@@ -4,7 +4,7 @@
 //!   normal ↔ has_selection ↔ composing(IME)
 //! - buf 始终合法 UTF-8；caret/anchor 只落在码点边界（core/utf8 步进，禁裸 +1）；
 //! - composing 期间 buf 与 caret 冻结；组合串显示在 caret 处（下划线）；
-//! - 组合提交合并为一步 undo（undo M6 交付，M5 先留结构）；
+//! - 组合提交合并为一步 undo；TODO(M6)：undo 栈待交付；
 //! - 视觉只取 theme token（L9）。
 //!
 //! 帧路径（measure/paint）零分配：composing 显示 = buf + 组合串分开 layout 绘制，
@@ -348,7 +348,7 @@ fn insertText(tree: *node.Tree, d: *widget.Edit, text: []const u8) void {
     d.buf = new;
     d.caret = caret + @as(u32, @intCast(text.len));
     d.anchor = d.caret;
-    // 组合提交合并为一步 undo（undo M6；此处仅退出 composing）。
+    // 组合提交本应合并为一步 undo；TODO(M6)：暂未实现，此处仅退出 composing。
     d.composing = false;
     d.compose_text = "";
 }

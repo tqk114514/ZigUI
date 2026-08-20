@@ -11,11 +11,10 @@ const geo = @import("geometry.zig");
 const layout = @import("layout.zig");
 
 /// 各内建控件的数据 struct —— 均为纯数据，字段语义见 §5 各节。
-pub const Box = struct {
-    // 纯布局容器，不绘制；无额外数据。
-};
+/// 纯布局容器，不绘制；无额外数据。
+pub const Box = struct {};
 
-/// 文本控件数据（M2 深化；M4 加 wrap/ellipsis）。
+/// 文本控件数据（含 wrap/ellipsis 选项）。
 pub const Text = struct {
     text: []const u8,
     /// 超出可用宽度时换行（多行）。默认单行不换行。
@@ -24,18 +23,18 @@ pub const Text = struct {
     ellipsis: bool = false,
 };
 
-/// 按钮控件数据（M3；M1 仅占位）。
+/// 按钮控件数据。
 pub const Button = struct {
     label: []const u8,
 };
 
-/// 编辑框控件数据（M5）。
+/// 编辑框控件数据。
 ///
 /// 状态机（§5.8）：
 ///   normal ↔ has_selection ↔ composing(IME)
 /// - buf 始终合法 UTF-8；caret/anchor 只落在码点边界（core/utf8 步进）；
 /// - composing 期间 buf 与 caret 冻结，组合串显示在 caret 处（带下划线）；
-/// - 组合提交合并为一步 undo（undo M6 交付，M5 先留位）。
+/// - 组合提交合并为一步 undo；TODO(M6)：undo 栈待交付。
 pub const Edit = struct {
     /// 缓冲区（arena，始终合法 UTF-8）。
     buf: []const u8 = "",
@@ -59,12 +58,12 @@ pub const Edit = struct {
     }
 };
 
-/// 滚动容器数据（M6；M1 占位）。
+/// 滚动容器数据（TODO(M6)：未交付）。
 pub const Scroll = struct {};
 
 /// custom 变体的 vtable：用户扩展入口（§5.4）。
 pub const CustomVTable = struct {
-    /// 在给定约束下返回固有尺寸。M1 起生效；paint/onEvent 待 M2/M3 补齐。
+    /// 在给定约束下返回固有尺寸。
     measure: *const fn (ctx: *anyopaque, c: layout.Constraints) geo.Size,
     paint: ?*const fn (ctx: *anyopaque, pc: *anyopaque) void = null,
     on_event: ?*const fn (ctx: *anyopaque, player_ctx: *anyopaque, e: *const @import("event.zig").Event) bool = null,

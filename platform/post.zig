@@ -28,10 +28,12 @@ pub const PostBridge = struct {
     mutex: std.atomic.Mutex = .unlocked,
     queue: std.ArrayListUnmanaged(Task) = .empty,
 
+    /// 构造空任务桥。
     pub fn init(allocator: std.mem.Allocator) PostBridge {
         return .{ .allocator = allocator };
     }
 
+    /// 释放任务队列。
     pub fn deinit(self: *PostBridge) void {
         self.queue.deinit(self.allocator);
     }

@@ -182,6 +182,7 @@ pub const Device = struct {
         return false;
     }
 
+    /// 释放设备与全部缓存（render target / brush / 工厂）。
     pub fn deinit(self: *Device) void {
         // 注意：不可在此调用 releaseTarget()（它也会 reset brush_cache）。
         // brush_cache.deinit() 内部已 reset 释放全部 brush 并 deinit map；

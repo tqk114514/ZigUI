@@ -28,7 +28,7 @@ pub fn measure(tree: *node.Tree, d: widget.Text, c: layout.Constraints) geo.Size
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, rect: geo.Rect, d: widget.Text) void {
     if (d.text.len == 0) return;
     if (tree.text_system) |ts| {
-        // 用 rect 宽度换行约束；wrap/ellipsis 由控件数据决定（M4）。
+        // 用 rect 宽度换行约束；wrap/ellipsis 由控件数据决定。
         const opts = painter.TextLayoutOptions{ .wrap = d.wrap, .ellipsis = d.ellipsis };
         if (ts.layout(d.text, &tree.theme_ref.font_ui, rect.w, opts)) |tl| {
             pc.drawText(rect, tl, tree.theme_ref.text);

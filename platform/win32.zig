@@ -57,7 +57,7 @@ pub const system_information = zw.system.system_information;
 pub const system_ole = zw.system.ole; // 剪贴板格式（CF_UNICODETEXT 等）
 pub const globalization = zw.globalization; // HIMC/HKL 等输入法句柄
 
-// —— 渲染命名空间（M2 起启用，先留出口）——
+// —— 渲染命名空间 ——
 pub const direct2d = zw.graphics.direct2d;
 pub const direct_write = zw.graphics.direct_write;
 

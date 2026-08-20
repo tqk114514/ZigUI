@@ -1,4 +1,4 @@
-//! examples/edit —— M5：单行编辑框（打字 / 方向键 / Backspace / 选区 / 光标闪烁 / IME）。
+//! examples/edit —— 单行编辑框（打字 / 方向键 / Backspace / 选区 / 光标闪烁 / IME）。
 //! IME 手动验收清单见 checklists/ime.md（§7.3，微软拼音 + 搜狗 + 日语 MS-IME）。
 
 const std = @import("std");

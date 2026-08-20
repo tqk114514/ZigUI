@@ -1,13 +1,12 @@
-//! examples/threads —— M3：快照模式（规则 §5.12）。
+//! examples/threads —— 快照模式（规则 §5.12）。
 //! worker 线程产出不可变结果 → post 回 UI 线程 → 更新文本。
 //! 演示 Ui.post 的唯一正确用法：post 保证 FIFO + happens-before + 消息泵线程执行。
 //! 正确关闭顺序：window.run 的 on_close 钩子里 SetEvent 唤醒 worker → join
 //! （worker 立即放弃，不 post），之后任务桥才销毁——关闭无延迟且无 UAF。
 //!
-//! 注意：本示例的关闭安全依赖"示例自己 join worker"。日后（建议 M7 库稳定化）
-//! 可改为严格的引用计数版——PostBridge.post 先 refs++ 借用 → 检查 closed → 入队 →
-//! refs--，close 置 closed 后 spin 等 refs 归零再销毁。届时关闭安全由库保证，
-//! 调用方无需亲自 join；代价是 PostBridge 多一段借用逻辑。
+//! 注意：本示例的关闭安全依赖示例自己 join worker。
+//! TODO(M7)：改为库内引用计数版——PostBridge.post 先 refs++ 借用 → 检查 closed → 入队 →
+//! refs--，close 置 closed 后 spin 等 refs 归零再销毁，关闭安全由库保证、调用方无需 join。
 
 const std = @import("std");
 const ui = @import("zigui");

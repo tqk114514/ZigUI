@@ -31,7 +31,7 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
         .text => |d| text.measure(tree, d, c),
         .button => |d| button.measure(tree, d, c),
         .edit => |d| edit.measure(tree, d, c),
-        .scroll => .{}, // M6 交付
+        .scroll => .{}, // TODO(M6)：scroll 待交付
         .custom => unreachable, // custom 走自身 vtable，不经此路由
     };
 }

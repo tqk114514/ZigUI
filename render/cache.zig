@@ -18,6 +18,7 @@ pub const BrushCache = struct {
     /// 当前绑定的 render target（brush 由其创建，绑定时记录）。
     rt: ?*d2d.ID2D1RenderTarget = null,
 
+    /// 构造缓存。
     pub fn init(allocator: std.mem.Allocator, factory: *d2d.ID2D1Factory) BrushCache {
         return .{
             .allocator = allocator,
@@ -26,6 +27,7 @@ pub const BrushCache = struct {
         };
     }
 
+    /// 释放全部 brush 并销毁 map。
     pub fn deinit(self: *BrushCache) void {
         self.reset();
         self.map.deinit();

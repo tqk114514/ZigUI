@@ -1,4 +1,4 @@
-//! examples/bench —— M4 / §4.9：500 Text 节点绘制性能。
+//! examples/bench —— §4.9：500 Text 节点绘制性能。
 //! 顶部显示平均 FPS（30 帧滚动）；拖拽 resize 观察是否保持 60fps。
 //! CI 只编译不跑（防抖动，§7.2）；每里程碑人工跑一次记录进 CHANGELOG。
 

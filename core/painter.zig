@@ -15,13 +15,13 @@ pub const TextLayout = struct {
     /// 紧致包围盒（DIP），measure 直接使用（宽度不含尾随空白）。
     bounds: geo.Size = .{},
     /// 含尾随空白的宽度（caret 定位用，§5.8）。DWrite metrics.width 不含尾随空白，
-    /// 前缀"hello " 若用 bounds.width 会漏算空格导致光标偏位。M5 填充。
+    /// 前缀"hello " 若用 bounds.width 会漏算空格导致光标偏位。
     width_with_ws: f32 = 0,
-    /// 实现私有 payload（DWrite layout 等）。M4 填充。
+    /// 实现私有 payload（DWrite layout 等）。
     payload: *anyopaque = undefined,
 };
 
-/// 文本布局选项（M4：wrap / ellipsis）。
+/// 文本布局选项（wrap / ellipsis）。
 pub const TextLayoutOptions = struct {
     /// 超过 max_width 是否换行（多行文本）。
     wrap: bool = false,

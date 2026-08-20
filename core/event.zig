@@ -12,23 +12,23 @@ const geo = @import("geometry.zig");
 /// 指针事件载荷：窗口 DIP 坐标 + 状态位。
 pub const Pointer = struct {
     pos: geo.Point = .{},
-    /// 修饰键与按钮位（M3 触手把手补充具体枚举；M1 先留位）。
+    /// 修饰键位（event.Mod 按位或）。
     mods: u32 = 0,
     button: Button = .left,
-    /// 是否双击（WM_LBUTTONDBLCLK；Edit 双击选词用，M5）。
+    /// 是否双击（WM_LBUTTONDBLCLK；Edit 双击选词用）。
     double: bool = false,
 };
 
 /// 鼠标按钮。
 pub const Button = enum(u8) { none = 0, left = 1, right = 2, middle = 4 };
 
-/// 键盘事件载荷（M3 深化按键枚举；M1 先传虚拟键码）。
+/// 键盘事件载荷：虚拟键码 + 修饰键位。
 pub const Key = struct {
     vk: u32 = 0,
     mods: u32 = 0,
 };
 
-/// 虚拟键码（Win32 VK_* 子集，M3/M5 所需）。值对齐 Win32。
+/// 虚拟键码（Win32 VK_* 子集）。值对齐 Win32。
 pub const VK = struct {
     pub const BACKSPACE: u32 = 0x08;
     pub const TAB: u32 = 0x09;
@@ -53,12 +53,12 @@ pub const Mod = struct {
     pub const alt: u32 = 1 << 2;
 };
 
-/// 文本输入载荷（M5 由 WM_CHAR / IME 产生的 UTF-8 串）。
+/// 文本输入载荷（WM_CHAR / IME 产生的 UTF-8 串）。
 pub const TextInput = struct {
     text: []const u8 = "",
 };
 
-/// IME 组合串事件（M5 §5.10）：组合内容变化时派发。组合串的 arena 生命周期
+/// IME 组合串事件（§5.10）：组合内容变化时派发。组合串的 arena 生命周期
 /// = 当前事件，Edit 需留存须自行拷贝（§5.10）。
 pub const ImeCompose = struct {
     /// 当前组合串（UTF-8，事件期有效）。
@@ -73,7 +73,7 @@ pub const Event = union(enum) {
     key_down: Key,
     key_up: Key,
     text_input: TextInput,
-    /// M5：IME 组合串变化（§5.10）。
+    /// IME 组合串变化（§5.10）。
     ime_compose: ImeCompose,
     focus_gained,
     focus_lost,

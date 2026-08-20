@@ -4,7 +4,7 @@
 //! - **L4**：帧路径（measure/arrange/paint/事件分发）零分配，本文件相关函数不带 allocator 参数；
 //! - rect 只由 arrange 写入；measure 禁止读 rect（§5.3）；
 //! - `invalidateMeasure` 沿祖先链置位；重测尺寸不变则终止，不重排祖先（§5.5 传播终止）；
-//! - arrrange 不得改任何 measured；
+//! - arrange 不得改任何 measured；
 //! - hit test 跳过不可见与 pointer_pass 节点；handler 返回 true 停止冒泡。
 
 const std = @import("std");
@@ -21,7 +21,7 @@ pub const EventHandler = *const fn (node: *Node, ctx: ?*anyopaque, e: *const eve
 /// 节点 id：空串视为匿名。builder 用 find(id) 定位。
 pub const NodeId = []const u8;
 
-/// Style（§5.3）：margin/padding + 可选背景/边框。背景与边框由 paintTree 在 Node 层统一绘制（M2）。
+/// Style（§5.3）：margin/padding + 可选背景/边框。背景与边框由 paintTree 在 Node 层统一绘制。
 pub const Style = struct {
     margin: geo.Edges = .{},
     padding: geo.Edges = .{},
@@ -39,6 +39,7 @@ pub const Flags = packed struct(u32) {
     _: u28 = 0,
 };
 
+/// 节点（§5.3）：树的基本单元。持有 widget/样式/布局/子节点与脏标记。
 pub const Node = struct {
     id: NodeId = "",
     flags: Flags = .{},
@@ -76,7 +77,7 @@ pub const Node = struct {
     }
 };
 
-/// 剪贴板接口（M5 §5.11）：platform 实现，Edit 复制/粘贴经此（widgets 不碰平台）。
+/// 剪贴板接口（§5.11）：platform 实现，Edit 复制/粘贴经此（widgets 不碰平台）。
 pub const Clipboard = struct {
     vtable: *const VTable,
     impl: *anyopaque,
@@ -101,10 +102,11 @@ pub const Clipboard = struct {
 pub const DispatchTable = struct {
     measureWidget: *const fn (tree: *Tree, n: *Node, c: layout.Constraints) geo.Size,
     paintWidget: *const fn (tree: *Tree, n: *Node, pc: painter.PaintCtx) void,
-    /// M5：内建控件的事件处理（Edit 等，§5.8 状态机）。返回 true = 已消费、停止冒泡。
+    /// 内建控件的事件处理（Edit 等，§5.8 状态机）。返回 true = 已消费、停止冒泡。
     onEvent: *const fn (tree: *Tree, n: *Node, e: *const event.Event) bool,
 };
 
+/// 树（§5.3）：arena 拥有全部节点；单值指针 focus/hover/active；提供布局与事件分发。
 pub const Tree = struct {
     arena: std.heap.ArenaAllocator,
     root: *Node,

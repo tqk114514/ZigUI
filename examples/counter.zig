@@ -1,4 +1,4 @@
-//! examples/counter —— M3：Button + click 回调 + 文本更新。
+//! examples/counter —— Button + click 回调 + 文本更新。
 //! 每例一个概念（规则 §3）：验证 hover/press 视觉（真实渲染）与 click 事件。
 
 const std = @import("std");

@@ -106,7 +106,7 @@ pub const D2DPainter = struct {
         _ = impl;
         _ = rect;
         // 剔除在 WM_PAINT 剪裁区之外由 BeginDraw 的更新区域处理；
-        // 简化：M2 全部绘制，M4 Scroll 引入精确剔除。
+        // 简化：全部绘制；TODO(M6)：Scroll 引入精确剔除。
         return true;
     }
 

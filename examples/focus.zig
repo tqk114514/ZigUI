@@ -1,4 +1,4 @@
-//! examples/focus —— M3：Tab / Shift-Tab 焦点环。
+//! examples/focus —— Tab / Shift-Tab 焦点环。
 //! 每例一个概念（规则 §3）：验证 focusable 节点按声明顺序循环。
 
 const std = @import("std");

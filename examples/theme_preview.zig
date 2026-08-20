@@ -1,4 +1,4 @@
-//! examples/theme_preview —— M2 渲染验收：主题预览（中文 + 拉丁 fallback）。
+//! examples/theme_preview —— 主题预览（中文 + 拉丁 fallback）。
 //! 每例一个概念（规则 §3）：验证 D2D 渲染、DWrite 文本（含中文）、主题 token 视觉。
 
 const std = @import("std");
@@ -19,7 +19,7 @@ pub fn main() anyerror!void {
         .bg = theme.light.bg_window,
     };
 
-    // 标题（等宽字体无法在此指定，M2 用 UI 字体；展示双语）。
+    // 标题（等宽字体无法在此指定，用 UI 字体；展示双语）。
     const addText = struct {
         fn push(t: *ui.core.node.Tree, text: []const u8) !void {
             const n = try t.createNode(t.root);

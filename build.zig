@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     linkNeededLibs(ui_module);
     b.installArtifact(lib);
 
-    // 测验根：ui.zig（M0 为空，M1 起 core/widgets 就地 test 在此汇聚）。
+    // 测试根：ui.zig（core/widgets 就地 test 在此汇聚）。
     const lib_tests_module = b.createModule(.{
         .root_source_file = b.path("ui.zig"),
         .target = target,
@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// M5 提供的示例清单。
+/// 示例清单（examples/，CI 全量编译）。
 const M0_EXAMPLES = [_][]const u8{
     "theme_preview",
     "counter",

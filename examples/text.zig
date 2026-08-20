@@ -1,4 +1,4 @@
-//! examples/text —— M4：文本深化（wrap / ellipsis / 多行）。
+//! examples/text —— 文本深化（wrap / ellipsis / 多行）。
 //! 每例一个概念（规则 §3）：验证 TextLayout 的换行与省略，拖拽窗口变窄可观察效果。
 
 const std = @import("std");

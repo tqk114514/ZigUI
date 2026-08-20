@@ -3,7 +3,7 @@
 //! 模块不变量：
 //! - 控件视觉只能取自此处 token，禁止硬编码颜色/字体/圆角/间距（L9）；
 //! - 全部为 comptime 常量，跨窗口共享；树内不拷贝（§5.12）；
-//! 8pt 网格：间距基准 = {4, 8, 12, 16, 24}。
+//! - 8pt 网格：间距基准 = {4, 8, 12, 16, 24}。
 
 const std = @import("std");
 
@@ -18,6 +18,7 @@ pub const Color = struct {
     pub fn rgb(r: f32, g: f32, b: f32) Color {
         return .{ .r = r, .g = g, .b = b };
     }
+    /// 带透明度颜色（a ∈ [0,1]）。
     pub fn rgba(r: f32, g: f32, b: f32, a: f32) Color {
         return .{ .r = r, .g = g, .b = b, .a = a };
     }
@@ -49,6 +50,7 @@ pub const Radius = struct {
     large: f32 = 12.0,
 };
 
+/// 间距基准（8pt 网格）。
 pub const Spacing = struct {
     xxs: f32 = 4.0,
     xs: f32 = 8.0,
@@ -88,6 +90,7 @@ pub const Theme = struct {
     spacing: Spacing,
 };
 
+/// 浅色预设。
 pub const light = Theme{
     .name = "light",
     .bg_window = Color.rgb(0.96, 0.96, 0.97),
@@ -107,6 +110,7 @@ pub const light = Theme{
     .spacing = .{},
 };
 
+/// 深色预设。
 pub const dark = Theme{
     .name = "dark",
     .bg_window = Color.rgb(0.11, 0.11, 0.12),

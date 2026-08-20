@@ -29,7 +29,7 @@ pub fn row(tree: *node.Tree, parent: *node.Node, opts: layout.Stack) !*node.Node
     return n;
 }
 
-/// 创建文本节点。`opts` 支持 wrap/ellipsis（M4）。
+/// 创建文本节点。`opts` 支持 wrap/ellipsis。
 pub fn text(tree: *node.Tree, parent: *node.Node, str: []const u8, opts: painter.TextLayoutOptions) !*node.Node {
     const n = try tree.createNode(parent);
     n.widget = .{ .text = .{ .text = try tree.allocStr(str), .wrap = opts.wrap, .ellipsis = opts.ellipsis } };

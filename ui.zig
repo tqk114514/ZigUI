@@ -1,11 +1,11 @@
 //! zigui —— Windows 单平台、保留模式、全自绘的轻量现代 UI 工具包。
 //! 本文件是唯一公共 API 出口（规则 §3），其他文件的 pub 一律视为 internal。
 //!
-//! 模块不变量（M5 现状）：
+//! 模块不变量：
 //! - 仅 re-export 公共 API，不在此实现逻辑；
 //! - core/ 不得 import 平台/渲染模块（L1），此处同样不触碰 win32。
 //!
-//! 现状：M5（Edit + IME + 剪贴板）已交付。M6 将新增 Scroll + 控件组 + undo。
+//! 现状：M5（Edit + IME + 剪贴板）。
 
 const std = @import("std");
 
@@ -15,7 +15,7 @@ pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 }
 /// 主题 token（light / dark），纯数据。（§5.2）
 pub const theme = @import("theme.zig");
 
-/// 核心模型（M1）：纯净逻辑，可脱离 Windows 单测。
+/// 核心模型：纯净逻辑，可脱离 Windows 单测。
 pub const core = struct {
     pub const geometry = @import("core/geometry.zig");
     pub const layout = @import("core/layout.zig");
@@ -25,7 +25,7 @@ pub const core = struct {
     pub const painter = @import("core/painter.zig");
 };
 
-/// 控件行为层（M2 起）：dispatch 表 + 各控件行为。
+/// 控件行为层：dispatch 表 + 各控件行为。
 pub const widgets = struct {
     pub const dispatch = @import("widgets/dispatch.zig");
     pub const text = @import("widgets/text.zig");
@@ -34,7 +34,7 @@ pub const widgets = struct {
     pub const builder = @import("widgets/builder.zig");
 };
 
-/// 渲染层（M2）：D2D/DWrite 实现。
+/// 渲染层：D2D/DWrite 实现。
 pub const render = struct {
     pub const device = @import("render/device.zig");
     pub const cache = @import("render/cache.zig");
@@ -42,7 +42,7 @@ pub const render = struct {
     pub const painter = @import("render/painter.zig");
 };
 
-/// 平台层：窗口/消息泵。M0 仅开放最小窗口能力。
+/// 平台层：窗口/消息泵。
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const input = @import("platform/input.zig");
@@ -53,7 +53,7 @@ pub const platform = struct {
 /// 从 window.run 获取；post 保证 FIFO + happens-before + 消息泵线程执行。
 pub const Ui = platform.post.PostBridge;
 
-// 计划中的公共出口（M1 起逐步开放）：
+// 计划中的公共出口：
 //   pub const Tree   = core.node.Tree;
 //   pub const Widget = core.widget.Widget;
 //   ...
