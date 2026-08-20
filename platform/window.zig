@@ -634,8 +634,10 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 return 0;
             }
         },
-        // —— 最大化按钮的 NC 状态（HTMAXBUTTON，§5.9）：跟踪 hover/press 视觉，
-        //    系统行为（Snap Layouts 悬停触发 / 点击最大化）交给 DefWindowProc ——
+        // —— 最大化按钮（HTMAXBUTTON，§5.9）——
+        // Snap Layouts 悬停面板由 DWM 据 WM_NCHITTEST 触发，与按下无关。
+        // 按下/抬起必须完全自处理、不交 DefWindowProcW：系统对 HTMAXBUTTON 的按下会
+        // 捕获鼠标进入 Snap 预览，导致 WM_NCLBUTTONUP 不再发给本窗口（点击永远不触发）。
         w32.windows_and_messaging.WM_NCMOUSEMOVE => {
             if (ctx != null and ctx.?.titlebar_active) {
                 const new_hover: i8 = if (w_param == w32.windows_and_messaging.HTMAXBUTTON) BTN_MAX else BTN_NONE;
@@ -650,13 +652,17 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
             if (ctx != null and ctx.?.titlebar_active and w_param == w32.windows_and_messaging.HTMAXBUTTON) {
                 ctx.?.tb_pressed = BTN_MAX;
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                return 0; // 不交系统：避免 Snap 预览捕获鼠标吞掉抬起事件
             }
             return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
         },
         w32.windows_and_messaging.WM_NCLBUTTONUP => {
-            if (ctx != null and ctx.?.titlebar_active and ctx.?.tb_pressed != BTN_NONE) {
+            if (ctx != null and ctx.?.titlebar_active and ctx.?.tb_pressed == BTN_MAX) {
                 ctx.?.tb_pressed = BTN_NONE;
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                // 自定义标题栏移除标准栏后系统不执行 HTMAXBUTTON 点击，需手动最大化/恢复。
+                titlebarAction(ctx.?, BTN_MAX);
+                return 0;
             }
             return w32.user32.DefWindowProcW(hwnd, u_msg, w_param, l_param);
         },
