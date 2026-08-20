@@ -24,6 +24,10 @@ Write-Host "=== 2/5 zig build test ==="
 zig build test
 Assert-Exit0 "zig build test"
 
+Write-Host "=== 2b/5 zig build docs ==="
+zig build docs
+Assert-Exit0 "zig build docs"
+
 Write-Host "=== 3/5 zig build (examples) ==="
 zig build
 Assert-Exit0 "zig build examples"

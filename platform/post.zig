@@ -16,16 +16,21 @@ const log = std.log.scoped(.post);
 
 /// 任务：type + owner 指针 + 方法（comptime trampoline，§5.8）。
 pub const Task = struct {
+    /// 任务属主（生命周期归调用方，§5.12）。
     owner: *anyopaque,
+    /// 执行方法（消息泵线程调用）。
     run: *const fn (owner: *anyopaque) void,
 };
 
 /// 跨线程任务桥。由 window.run 创建并绑定 hwnd；post 可从任意线程调用。
 pub const PostBridge = struct {
+    /// 任务队列分配器（不进树 arena，§5.12）。
     allocator: std.mem.Allocator,
+    /// 绑定的窗口句柄（唤醒消息泵用）。
     hwnd: w32.HWND = undefined,
     /// Zig 0.16：std.atomic.Mutex（自旋锁，临界区极短适用；提供 acquire/release happens-before）。
     mutex: std.atomic.Mutex = .unlocked,
+    /// 任务队列（FIFO）。
     queue: std.ArrayListUnmanaged(Task) = .empty,
 
     /// 构造空任务桥。

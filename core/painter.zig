@@ -32,7 +32,9 @@ pub const TextLayoutOptions = struct {
 /// TextSystem 接口（§5.7）：layout 必须命中缓存（L4 稳态零分配）。
 /// core 只定义接口；render/text.zig 提供 DWrite 实现，测试用 Mock 提供假尺寸。
 pub const TextSystem = struct {
+    /// 实现 vtable。
     vtable: *const VTable,
+    /// 实现实例（render 提供）。
     impl: *anyopaque,
 
     pub const VTable = struct {
@@ -48,8 +50,11 @@ pub const TextSystem = struct {
 /// PaintCtx 接口：render 实现必须满足（§5.6）。
 /// `impl` 是实现侧对象指针，vtable 方法以其为 opaque 参数被调用。
 pub const PaintCtx = struct {
+    /// 实现 vtable（render/D2D 或 MockPainter）。
     vtable: *const VTable,
+    /// 实现实例指针。
     impl: *anyopaque,
+    /// 主题引用（L9：控件视觉只取 token）。
     theme_ref: *const theme.Theme,
 
     pub const VTable = struct {
@@ -83,8 +88,11 @@ pub const PaintCtx = struct {
 
 /// MockPainter：录制 draw call 序列供测试断言。
 pub const MockPainter = struct {
+    /// 录制的 draw call 序列（测试断言用）。
     calls: std.ArrayListUnmanaged(Call) = .empty,
+    /// 分配器（init 时传入）。
     allocator: std.mem.Allocator,
+    /// 装配好的 PaintCtx（impl 指向自身）。
     ctx: PaintCtx = undefined,
     /// 可选有效裁剪区：非 null 时 clipIntersects 按其判定（测试 Scroll 剔除，§5.4）。
     clip_rect: ?geo.Rect = null,

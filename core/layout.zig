@@ -18,7 +18,9 @@ pub const max_dim: f32 = 1_000_000.0;
 
 /// 布局约束：min/max 尺寸（DIP）。
 pub const Constraints = struct {
+    /// 最小尺寸（DIP）。
     min: geo.Size = .{},
+    /// 最大尺寸（DIP）。
     max: geo.Size = .{ .width = max_dim, .height = max_dim },
 
     /// 取非约束形式：只保留 max（给子节点的默认约束，§5.5）。
@@ -56,7 +58,9 @@ pub const CrossAlign = enum { start, center, stretch };
 
 /// Stack（row / column）的参数。
 pub const Stack = struct {
+    /// 主轴子节点间距（DIP）。
     gap: f32 = 0,
+    /// 交叉轴对齐。
     cross: CrossAlign = .stretch,
 };
 

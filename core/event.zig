@@ -30,26 +30,43 @@ pub const Key = struct {
 
 /// 虚拟键码（Win32 VK_* 子集）。值对齐 Win32。
 pub const VK = struct {
+    /// 退格键。
     pub const BACKSPACE: u32 = 0x08;
+    /// Tab 键（焦点环，§5.3）。
     pub const TAB: u32 = 0x09;
+    /// 回车键。
     pub const RETURN: u32 = 0x0D;
+    /// Shift 键。
     pub const SHIFT: u32 = 0x10;
+    /// Ctrl 键。
     pub const CONTROL: u32 = 0x11;
+    /// Alt/Menu 键。
     pub const MENU: u32 = 0x12;
+    /// 空格键。
     pub const SPACE: u32 = 0x20;
+    /// End 键（单行编辑框 = 行尾）。
     pub const END: u32 = 0x23;
+    /// Home 键（单行编辑框 = 行首）。
     pub const HOME: u32 = 0x24;
+    /// 左方向键。
     pub const LEFT: u32 = 0x25;
+    /// 上方向键（单行编辑框 = 行首）。
     pub const UP: u32 = 0x26;
+    /// 右方向键。
     pub const RIGHT: u32 = 0x27;
+    /// 下方向键（单行编辑框 = 行尾）。
     pub const DOWN: u32 = 0x28;
+    /// Delete 键。
     pub const DELETE: u32 = 0x2E;
 };
 
 /// 修饰键位（mods 字段）。
 pub const Mod = struct {
+    /// Shift 位。
     pub const shift: u32 = 1 << 0;
+    /// Ctrl 位。
     pub const control: u32 = 1 << 1;
+    /// Alt 位。
     pub const alt: u32 = 1 << 2;
 };
 

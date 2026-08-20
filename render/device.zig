@@ -18,9 +18,13 @@ const log = std.log.scoped(.render);
 
 /// 渲染设备：持有工厂与 render target，负责创建/重设/设备丢失恢复。
 pub const Device = struct {
+    /// 分配器（init 传入，页面级）。
     allocator: std.mem.Allocator,
+    /// D2D 工厂（UI 单线程）。
     d2d_factory: *d2d.ID2D1Factory,
+    /// DWrite 工厂（线程安全，单例）。
     dwrite_factory: *dw.IDWriteFactory,
+    /// 绑定的窗口句柄（L2：整个 UI 一个顶层 HWND）。
     hwnd: win32.HWND,
     /// 可为 null：窗口未显示前延迟创建（首次 beginFrame 时确保）。
     rt: ?*d2d.ID2D1HwndRenderTarget = null,
@@ -29,7 +33,9 @@ pub const Device = struct {
     /// 内容区物理像素尺寸（像素）；WM_SIZE 时更新。
     px_width: u32 = 0,
     px_height: u32 = 0,
+    /// 颜色 → 实心画刷 缓存（§5.6 对象缓存强制）。
     brush_cache: cache.BrushCache,
+    /// DWrite 文本系统（TextFormat + TextLayout 缓存，§5.7）。
     text_system: text.TextSystemImpl,
 
     /// 创建设备。失败返回错误（可失败边界，§4.2）。

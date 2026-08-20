@@ -23,35 +23,56 @@ pub const NodeId = []const u8;
 
 /// Style（§5.3）：margin/padding + 可选背景/边框。背景与边框由 paintTree 在 Node 层统一绘制。
 pub const Style = struct {
+    /// 外边距（DIP）。
     margin: geo.Edges = .{},
+    /// 内边距（DIP）。
     padding: geo.Edges = .{},
+    /// 可选背景色（theme token，L9）。
     bg: ?theme.Color = null,
+    /// 可选边框色（theme token，L9）。
     border_color: ?theme.Color = null,
+    /// 边框宽度（DIP）。
     border_width: f32 = 0,
 };
 
 /// Flags（§5.3）。
 pub const Flags = packed struct(u32) {
+    /// 是否参与绘制/命中。
     visible: bool = true,
+    /// 命中穿透：指针事件穿过本节点（§5.3）。
     pointer_pass: bool = false,
+    /// 可聚焦（Tab 焦点环，§5.3）。
     focusable: bool = false,
+    /// 禁用：吸收一切输入。
     disabled: bool = false,
     _: u28 = 0,
 };
 
 /// 节点（§5.3）：树的基本单元。持有 widget/样式/布局/子节点与脏标记。
 pub const Node = struct {
+    /// 节点 id（空串 = 匿名；builder 用 find(id) 定位）。
     id: NodeId = "",
+    /// 可见/穿透/可聚焦/禁用 标志位。
     flags: Flags = .{},
-    rect: geo.Rect = .{}, // arrange 输出，父坐标系，DIP
-    measured: geo.Size = .{}, // measure 缓存
-    cache_cons: layout.Constraints = .{}, // 缓存键：上次约束
+    /// 布置矩形（arrange 输出，父坐标系，DIP）。
+    rect: geo.Rect = .{},
+    /// 测量缓存（measure 输出）。
+    measured: geo.Size = .{},
+    /// 缓存键：上次约束（§5.5）。
+    cache_cons: layout.Constraints = .{},
+    /// 样式：margin/padding/背景/边框。
     style: Style = .{},
+    /// 布局：row/column/none（§5.5）。
     layout: layout.Layout = .none,
+    /// 子节点（arena 上的 slice）。
     children: []*Node = &.{},
+    /// 父节点回指针（事件冒泡用）。
     parent: ?*Node = null,
+    /// 控件数据（Widget union）。
     widget: widget.Widget = .none,
+    /// 测量脏标记（invalidateMeasure 沿祖先链置位）。
     dirty_measure: bool = true,
+    /// 绘制脏标记（invalidatePaint 沿祖先链置位）。
     dirty_paint: bool = true,
     /// 布局脏标记（§6）：滚动偏移等"仅改显示不改尺寸"的变更强制 arrange 重排
     /// （传播终止 §5.5 的例外）。沿祖先链置位，arrange 消费后清除。
@@ -59,7 +80,9 @@ pub const Node = struct {
     /// 拖拽型控件标记（§6，slider 等）：接管按下后置位；抬起事件无论是否命中自身
     /// 都沿其冒泡（拖动结束通知 handler）。由 Tree.dispatch 在 pointer_up 读取并清除。
     release_anywhere: bool = false,
+    /// 用户事件处理器（builder 挂接，§5.8）。返回 true 停止冒泡。
     handler: ?EventHandler = null,
+    /// handler 的 ctx（trampoline，生命周期归用户，§5.12）。
     handler_ctx: ?*anyopaque = null,
     /// 本次 measure 是否尺寸未变（传播终止用，每轮 ensureLayout 重置）。
     measured_same: bool = false,
@@ -95,7 +118,9 @@ pub const Node = struct {
 
 /// 剪贴板接口（§5.11）：platform 实现，Edit 复制/粘贴经此（widgets 不碰平台）。
 pub const Clipboard = struct {
+    /// 实现 vtable（core 只持接口）。
     vtable: *const VTable,
+    /// 实现实例（platform 提供）。
     impl: *anyopaque,
 
     pub const VTable = struct {
@@ -116,7 +141,9 @@ pub const Clipboard = struct {
 /// 控件行为分发表（§5.4）：widgets/dispatch.zig 提供实现，Tree 持引用。
 /// core 不 import widgets（避免环），仅通过函数指针调用。
 pub const DispatchTable = struct {
+    /// 求叶子控件固有尺寸。只被 core 在"该节点是叶子控件"时调用。
     measureWidget: *const fn (tree: *Tree, n: *Node, c: layout.Constraints) geo.Size,
+    /// 绘制叶子控件内容。只被 core 在 paintNode 中调用。
     paintWidget: *const fn (tree: *Tree, n: *Node, pc: painter.PaintCtx) void,
     /// 内建控件的事件处理（Edit 等，§5.8 状态机）。返回 true = 已消费、停止冒泡。
     onEvent: *const fn (tree: *Tree, n: *Node, e: *const event.Event) bool,
@@ -124,11 +151,17 @@ pub const DispatchTable = struct {
 
 /// 树（§5.3）：arena 拥有全部节点；单值指针 focus/hover/active；提供布局与事件分发。
 pub const Tree = struct {
+    /// 整树内存的所有者（§4.3：deinit 整树丢弃）。
     arena: std.heap.ArenaAllocator,
+    /// 树根节点（视口容器）。
     root: *Node,
+    /// 当前焦点节点（Tab 焦点环，§5.3）。
     focus: ?*Node = null,
+    /// 当前悬停节点（hover 状态推导，§5.3）。
     hover: ?*Node = null,
+    /// 当前按下节点（pressed 状态与拖选路由，§5.3）。
     active: ?*Node = null,
+    /// 主题引用（§5.2：共享常量）。
     theme_ref: *const theme.Theme,
     /// 文本系统（§5.7）：text 控件 measure 消费 bounds。默认 null（无文本能力）。
     text_system: ?painter.TextSystem = null,

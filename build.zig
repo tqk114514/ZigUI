@@ -24,6 +24,15 @@ pub fn build(b: *std.Build) void {
     linkNeededLibs(ui_module);
     b.installArtifact(lib);
 
+    // 文档：zigdoc 生成（§4.8.1 M7 收口；ui.zig 是唯一公共出口，文档取自库根模块）。
+    const docs_install = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate API documentation (zigdoc)");
+    docs_step.dependOn(&docs_install.step);
+
     // 测试根：ui.zig（core/widgets 就地 test 在此汇聚）。
     const lib_tests_module = b.createModule(.{
         .root_source_file = b.path("ui.zig"),

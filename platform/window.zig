@@ -35,8 +35,11 @@ pub const RunResult = enum { closed };
 
 /// 平台选项。
 pub const Options = struct {
+    /// 窗口标题（UTF-16，调用方持有）。
     title: [:0]const u16,
+    /// 初始客户区宽度（物理像素）。
     width: i32 = 960,
+    /// 初始客户区高度（物理像素）。
     height: i32 = 600,
     /// 主题引用（§5.12：theme 是共享常量）。
     theme_ref: *const theme.Theme = &theme.dark,

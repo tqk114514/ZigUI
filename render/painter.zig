@@ -17,6 +17,7 @@ const text_mod = @import("text.zig");
 
 /// D2D 实现的 PaintCtx：持 device 引用，vtable 固定。
 pub const D2DPainter = struct {
+    /// 渲染设备引用（持有 target 与缓存）。
     device: *device_mod.Device,
 
     /// 裁剪栈（DIP）：pushClip/popClip 同步维护，clipIntersects 据此剔除（§5.4

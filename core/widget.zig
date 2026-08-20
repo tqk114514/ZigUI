@@ -115,13 +115,17 @@ pub const Slider = struct {
 pub const CustomVTable = struct {
     /// 在给定约束下返回固有尺寸。
     measure: *const fn (ctx: *anyopaque, c: layout.Constraints) geo.Size,
+    /// 绘制自定义内容。可选（null = 不绘制）。
     paint: ?*const fn (ctx: *anyopaque, pc: *anyopaque) void = null,
+    /// 自定义事件处理。可选（null = 不处理）。返回 true 停止冒泡。
     on_event: ?*const fn (ctx: *anyopaque, player_ctx: *anyopaque, e: *const @import("event.zig").Event) bool = null,
 };
 
 /// custom 变体数据：ctx 指针 + vtable（§5.4）。
 pub const Custom = struct {
+    /// 用户扩展实例指针（生命周期归用户，§5.12）。
     ctx: *anyopaque,
+    /// 行为 vtable。
     vtable: *const CustomVTable,
 };
 

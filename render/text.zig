@@ -49,7 +49,9 @@ fn defaultBudgetBytes() usize {
 
 /// DWrite TextSystem 实现。持有工厂与两级缓存。
 pub const TextSystemImpl = struct {
+    /// 分配器（页面级，缓存键/条目归属）。
     allocator: std.mem.Allocator,
+    /// DWrite 工厂（线程安全）。
     factory: *dw.IDWriteFactory,
     /// TextFormat 按（字族+字号+字重）缓存。数量少（theme 两槽），无界。
     format_cache: std.StringHashMapUnmanaged(*dw.IDWriteTextFormat) = .empty,
@@ -77,7 +79,9 @@ pub const TextSystemImpl = struct {
 
     /// 缓存条目：TextLayout（core 契约）+ DWrite 对象指针。
     pub const LayoutEntry = struct {
+        /// core 契约的 TextLayout（bounds + payload 指向下方 DWrite 对象）。
         tl: painter.TextLayout,
+        /// DWrite 布局对象（随条目释放）。
         dw_layout: *dw.IDWriteTextLayout,
         /// ellipsis 的修剪符号（若有）。随条目释放，避免悬垂/泄漏。
         ellipsis_sign: ?*dw.IDWriteInlineObject = null,
