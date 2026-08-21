@@ -102,6 +102,9 @@ pub const Node = struct {
     handler: ?EventHandler = null,
     /// handler 的 ctx（trampoline，生命周期归用户，§5.12）。
     handler_ctx: ?*anyopaque = null,
+    /// 悬浮提示文本（P0-1 弹层）：非空 = hover 停留 0.5s 后于锚附近显示 Tooltip 浮层。
+    /// setter（builder.tooltip）拷贝入 arena（L5）；文本由 Controller 消费。
+    tip: []const u8 = "",
     /// 本次 measure 是否尺寸未变（传播终止用，每轮 ensureLayout 重置）。
     measured_same: bool = false,
     /// 本节点或任一后代本次 measure 是否有变化（决定是否需重排子树）。
@@ -230,21 +233,37 @@ pub const Tree = struct {
     /// 消费后置 null。null + 无布局松动 = 整窗重绘。只含"纯绘制状态变化"的叶子矩形；
     /// measure/layout 松动在 beginPaintDirty 判定为整窗。
     dirty_rect: ?geo.Rect = null,
+    /// 顶层浮层槽（P0-1 弹层体系）：独立于 root 子树的 overlay 根，layout .none、
+    /// 自身 pointer_pass（空命中穿透回落 root）。paint 在 root 之后（最顶）；指针命中
+    /// 优先于 root（hitTestTop）。浮层子节点用 hand_rect 手填定位（客户区坐标 =
+    /// overlay.rect 原点为窗口 (0,0)），各自以 pointer_pass 决定命中是否穿透。
+    overlay: *Node,
 
     pub fn init(allocator: std.mem.Allocator, th: *const theme.Theme) !Tree {
         var tree = Tree{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .root = undefined,
             .theme_ref = th,
+            .overlay = undefined,
         };
         tree.root = try tree.alloc(Node);
         tree.root.* = .{ .layout = .{ .column = .{} }, .parent = null };
+        // 顶层浮层槽（P0-1）：layout .none（子节点 hand_rect 手填）；自身 pointer_pass
+        // ——浮层空命中穿透回落 root 子树，不遮挡下层交互。
+        tree.overlay = try tree.alloc(Node);
+        tree.overlay.* = .{
+            .layout = .{ .none = {} },
+            .parent = null,
+            .flags = .{ .pointer_pass = true },
+        };
         return tree;
     }
 
     /// 遍历绘制（§5.4 paintTree 顺序）。pc 是 render 实现的 PaintCtx。
+    /// 顶层浮层（P0-1）在 root 子树之后绘制——恒为最顶，不受 root 内 layer_z 影响。
     pub fn paint(t: *Tree, pc: painter.PaintCtx) void {
         paintNode(t, pc, t.root);
+        paintNode(t, pc, t.overlay);
     }
 
     /// 供离屏表面宿主调用：以自定义裁剪区绘制 node 的子节点（scroll 条带 / 静态层内容栅格化，§5.6）。
@@ -281,6 +300,7 @@ pub const Tree = struct {
     /// 起见后续 O(1)：已设过则整子树跳过。
     fn syncNodeTree(t: *Tree) void {
         syncNodeChildren(t.root, t);
+        syncNodeChildren(t.overlay, t);
     }
     fn syncNodeChildren(n: *Node, t: *Tree) void {
         if (n.tree == t) return;
@@ -331,6 +351,7 @@ pub const Tree = struct {
 
     /// 惰性布局：绘制前或任何读 rect 前必须调用（§5.3）。稳态零分配。
     /// root 从 content_top（§5.9 自定义标题栏）开始排布，尺寸 = 窗口减顶部偏移。
+    /// overlay（P0-1 浮层槽）覆盖整个客户区（原点 (0,0)），arrange 提升子 hand_rect。
     pub fn ensureLayout(t: *Tree, window_size: geo.Size) void {
         t.syncNodeTree(); // 首次：回填 node.tree 反向指针（部分重绘上报脏区用）。
         const root_c = layout.Constraints{
@@ -344,6 +365,10 @@ pub const Tree = struct {
             .h = window_size.height - t.content_top,
         };
         t.arrange(t.root, t.root.rect);
+        // 顶层浮层：不参与 root 的 measure（不占布局）；只 arrange 提升 hand_rect。
+        // overlay 恒 desc_changed（从不 measure）→ arrange 每轮执行；子树极小，成本可忽略。
+        t.overlay.rect = .{ .w = window_size.width, .h = window_size.height };
+        t.arrange(t.overlay, t.overlay.rect);
     }
 
     // —— measure ——
@@ -375,7 +400,7 @@ pub const Tree = struct {
         // 叶子控件：行为经 DispatchTable 委托（§5.4）；无 dispatch 时按空处理。
         // 穷尽 switch（L8）：新增叶子控件必须在此登记，否则被当布局容器测得 0 尺寸。
         switch (n.widget) {
-            .text, .button, .edit, .checkbox, .slider => {
+            .text, .button, .edit, .checkbox, .slider, .tooltip => {
                 if (t.dispatch_table) |d| return c.constrain(d.measureWidget(t, n, c.loosen()));
                 return c.constrain(.{});
             },
@@ -530,7 +555,7 @@ pub const Tree = struct {
         }
         switch (e.*) {
             .pointer_move => |p| {
-                const hit = hitTest(t.root, p.pos);
+                const hit = t.hitTestTop(p.pos);
                 // disabled 吸收一切输入（§5.8）：不作为 hover 目标（否则取 hover 变体）。
                 const hover_target = if (hit) |h| (if (h.flags.disabled) null else h) else null;
                 // hover 变化：旧节点与新节点都重绘。
@@ -564,7 +589,7 @@ pub const Tree = struct {
                 return if (hit) |n| bubble(t, n, e) else false;
             },
             .pointer_down => |p| {
-                const hit = hitTest(t.root, p.pos) orelse {
+                const hit = t.hitTestTop(p.pos) orelse {
                     // 点空白：清 active 并取消焦点（点击空白让 Edit 失焦，§5.3）。
                     t.active = null;
                     if (t.focus != null) t.setFocus(null);
@@ -599,7 +624,7 @@ pub const Tree = struct {
                 return bubble(t, hit, e);
             },
             .pointer_up => |p| {
-                const hit = hitTest(t.root, p.pos);
+                const hit = t.hitTestTop(p.pos);
                 if (t.active) |a| {
                     // 拖拽型控件（slider 等，§6）：接管按下后，抬起通知与命中位置无关。
                     const release_anywhere = a.release_anywhere;
@@ -636,7 +661,7 @@ pub const Tree = struct {
             .wheel => |w| {
                 // 滚轮（§6）：从命中节点向上找最近的 scroll 祖先，交给其事件处理；
                 // 内层 scroll 优先（命中处无 scroll 则交回冒泡，用户 handler 可选处理）。
-                const hit = hitTest(t.root, w.pos) orelse t.root;
+                const hit = t.hitTestTop(w.pos) orelse t.root;
                 var cur: ?*Node = hit;
                 while (cur) |c| {
                     if (c.widget == .scroll) {
@@ -762,6 +787,13 @@ pub const Tree = struct {
         }
         if (n.flags.pointer_pass) return null;
         return n;
+    }
+
+    /// 顶层命中（P0-1 弹层）：先 overlay 浮层（最顶），未命中或穿透则回落 root 子树。
+    /// 浮层子节点各自以 pointer_pass 决定是否拦截（Tooltip 穿透、ContextMenu 拦截）。
+    pub fn hitTestTop(t: *Tree, p: geo.Point) ?*Node {
+        if (hitTest(t.overlay, p)) |h| return h;
+        return hitTest(t.root, p);
     }
 
     /// 按 id（name）DFS 查找。
@@ -1593,4 +1625,90 @@ test "setFocus fires focus events" {
     try std.testing.expect(gained == 2);
     try std.testing.expect(lost == 1);
     try std.testing.expect(t.focus == b);
+}
+
+// —— P0-1 弹层：overlay 顶层浮层槽 ——
+
+test "overlay: ensureLayout lifts hand_rect to client coords (P0-1)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    // 浮层子节点手填客户区坐标（overlay 原点 = 窗口 (0,0)，不受 content_top 影响）。
+    const tip = try t.createNode(t.overlay);
+    tip.hand_rect = .{ .x = 10, .y = 20, .w = 60, .h = 18 };
+    try t.appendChild(t.overlay, tip);
+    t.content_top = 32; // 自定义标题栏偏移只作用于 root。
+
+    t.ensureLayout(.{ .width = 400, .height = 300 });
+    try std.testing.expect(geo.approxEq(10, tip.rect.x));
+    try std.testing.expect(geo.approxEq(20, tip.rect.y));
+    try std.testing.expect(geo.approxEq(60, tip.rect.w));
+    try std.testing.expect(geo.approxEq(18, tip.rect.h));
+    // 节点 tree 回填覆盖 overlay 子树（invalidatePaint 上报脏区前提）。
+    try std.testing.expect(tip.tree == &t);
+}
+
+test "overlay: painted last regardless of declaration in root (P0-1)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .{ .none = {} };
+    t.root.rect = .{ .w = 100, .h = 100 };
+    const base = try t.createNode(t.root);
+    base.style.bg = theme.light.bg_surface;
+    base.rect = .{ .w = 100, .h = 100 };
+    try t.appendChild(t.root, base);
+
+    const tip = try t.createNode(t.overlay);
+    tip.style.bg = theme.light.accent;
+    tip.hand_rect = .{ .x = 10, .y = 10, .w = 40, .h = 20 };
+    try t.appendChild(t.overlay, tip);
+    t.ensureLayout(.{ .width = 100, .height = 100 });
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+    t.paint(mp.ctx);
+
+    // fillRect 序列：root 内容先画、overlay 浮层最后（最顶）。
+    var colors: [2]theme.Color = undefined;
+    var ci: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect and ci < 2) {
+            colors[ci] = c.fillRect.color;
+            ci += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), ci);
+    try std.testing.expect(colorEq(colors[0], theme.light.bg_surface));
+    try std.testing.expect(colorEq(colors[1], theme.light.accent));
+}
+
+test "overlay: hitTestTop pass-through falls to root, interceptor catches (P0-1)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .{ .none = {} };
+    const base = try addFixedLeaf(&t, t.root, .{ .width = 100, .height = 100 });
+    base.hand_rect = .{ .w = 100, .h = 100 };
+
+    // 穿透浮层（Tooltip 语义）：覆盖 base 但命中穿透。
+    const pass = try addFixedLeaf(&t, t.overlay, .{ .width = 100, .height = 100 });
+    pass.hand_rect = .{ .w = 100, .h = 100 };
+    pass.flags.pointer_pass = true;
+    // 拦截浮层（ContextMenu 语义）：右下角 40×40 捕获命中。
+    const grab = try addFixedLeaf(&t, t.overlay, .{ .width = 40, .height = 40 });
+    grab.hand_rect = .{ .x = 60, .y = 60, .w = 40, .h = 40 };
+
+    t.ensureLayout(.{ .width = 100, .height = 100 });
+
+    // 穿透区：命中落到 root 的 base。
+    try std.testing.expect(Tree.hitTestTop(&t, .{ .x = 20, .y = 20 }).? == base);
+    // 拦截区：命中被浮层 grab 截获（先于 root）。
+    try std.testing.expect(Tree.hitTestTop(&t, .{ .x = 80, .y = 80 }).? == grab);
 }

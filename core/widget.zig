@@ -158,6 +158,22 @@ pub const Slider = struct {
     dragging: bool = false,
 };
 
+/// Tooltip 控件数据（P0-1 弹层体系最小切片）。
+///
+/// 状态机（P0-1，驱动源 = 指针 hover / Ticker 定时）：
+///   hidden → pending（hover 停留锚节点，Ticker setTimeout 0.5s）→ showing → hidden
+/// - 生命周期由 Controller（widgets/tooltip.zig）驱动；本 struct 只承载数据；
+/// - 节点挂 Tree.overlay 顶层浮层槽：hand_rect 定位（不占布局）、pointer_pass 命中穿透；
+/// - dismiss 触发：hover 离开锚 / 任一指针按下 / 窗口失焦 / resize（位置失效）。
+pub const Tooltip = struct {
+    /// 提示文本（arena）。
+    text: []const u8,
+    /// 内容区水平内边距（DIP，与 Edit 同节奏）。
+    pub const pad_h: f32 = 8;
+    /// 内容区垂直内边距（DIP）。
+    pub const pad_v: f32 = 4;
+};
+
 /// custom 变体的 vtable：用户扩展入口（§5.4）。
 pub const CustomVTable = struct {
     /// 在给定约束下返回固有尺寸。
@@ -186,6 +202,7 @@ pub const Widget = union(enum) {
     scroll: Scroll,
     checkbox: Checkbox,
     slider: Slider,
+    tooltip: Tooltip,
     custom: Custom,
 };
 
@@ -209,7 +226,8 @@ test "widget union exhaustive switch compiles" {
         .scroll => 5,
         .checkbox => 6,
         .slider => 7,
-        .custom => 8,
+        .tooltip => 8,
+        .custom => 9,
     };
     try std.testing.expect(result == 1);
     try std.testing.expect(!isNone(.box));

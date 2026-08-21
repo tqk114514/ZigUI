@@ -34,6 +34,7 @@ pub const widgets = struct {
     pub const scroll = @import("widgets/scroll.zig");
     pub const check = @import("widgets/check.zig");
     pub const slider = @import("widgets/slider.zig");
+    pub const tooltip = @import("widgets/tooltip.zig");
     pub const builder = @import("widgets/builder.zig");
 };
 
@@ -81,6 +82,7 @@ test "collect all core module tests" {
     _ = @import("widgets/scroll.zig");
     _ = @import("widgets/check.zig");
     _ = @import("widgets/slider.zig");
+    _ = @import("widgets/tooltip.zig");
     _ = @import("render/cache.zig");
     _ = @import("render/text.zig");
     _ = @import("platform/input.zig");

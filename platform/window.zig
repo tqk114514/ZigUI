@@ -21,6 +21,7 @@ const event = @import("../core/event.zig");
 const widget = @import("../core/widget.zig");
 const ticker_mod = @import("../core/ticker.zig");
 const dispatch = @import("../widgets/dispatch.zig");
+const tooltip_mod = @import("../widgets/tooltip.zig");
 const device_mod = @import("../render/device.zig");
 const painter_mod = @import("../render/painter.zig");
 const text_mod = @import("../render/text.zig");
@@ -94,6 +95,8 @@ const WindowCtx = struct {
     ticker: ticker_mod.Ticker = .{},
     /// 是否已挂着惰性唤醒定时器（ticker.hasActive 时才挂，空闲即杀 → 0% CPU，§4.9）。
     tick_active: bool = false,
+    /// Tooltip 控制器（P0-1 弹层）：hover 驱动 + Ticker 延迟 + tree.overlay 浮层。
+    tip: tooltip_mod.Controller,
     /// 光标闪烁周期定时器的 Ticker 句柄（无焦点 Edit 时为 null）。
     caret_timer: ?usize = null,
     /// 透明位图（系统 caret 用：全 0 单色位图，显示不可见但 GetCaretPos 定位有效）。
@@ -228,6 +231,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .frame_hook = opts.frame_hook,
         .frame_hook_ctx = opts.frame_hook_ctx,
         .ime = .{ .hwnd = hwnd },
+        .tip = tooltip_mod.Controller.init(tree),
         .title_utf8 = title_utf8,
         .titlebar_active = opts.use_titlebar,
         .min_dip = .{ .width = opts.min_width, .height = opts.min_height },
@@ -758,6 +762,8 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_KILLFOCUS => {
             if (ctx != null) {
                 // 失活：停止闪烁 + 销毁系统 caret + 停用 IME（强制完成组合）+ 取消 Edit 焦点。
+                // Tooltip（P0-1）：失焦取消显示。
+                ctx.?.tip.hide(&ctx.?.ticker);
                 if (ctx.?.caret_timer) |h| ctx.?.ticker.clearTimer(h);
                 ctx.?.caret_timer = null;
                 _ = w32.user32.DestroyCaret();
@@ -880,6 +886,22 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
                     // WM_MOUSEMOVE 不重置光标闪烁相位——否则鼠标悬停时 blink 恒 true，光标不闪。
                     if (u_msg != w32.windows_and_messaging.WM_MOUSEMOVE) syncCaretTimer(ctx.?);
+                    // Tooltip（P0-1 弹层）：move 驱动 hover 调度；按下 dismiss 并抑制。
+                    switch (u_msg) {
+                        w32.windows_and_messaging.WM_MOUSEMOVE => ctx.?.tip.sync(
+                            ctx.?.tree.hover,
+                            getClientSizeDips(ctx.?.device.?),
+                            &ctx.?.ticker,
+                            nowSeconds(),
+                        ),
+                        w32.windows_and_messaging.WM_LBUTTONDOWN,
+                        w32.windows_and_messaging.WM_RBUTTONDOWN,
+                        w32.windows_and_messaging.WM_MBUTTONDOWN,
+                        => ctx.?.tip.press(&ctx.?.ticker),
+                        else => {},
+                    }
+                    // tooltip 可能新挂/清除了定时器：同步惰性唤醒（§5.13）。
+                    syncTickTimer(ctx.?);
                 }
             }
             return 0;
@@ -996,6 +1018,9 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const w: u16 = @truncate(@as(u64, @bitCast(l_param)));
                 const h: u16 = @truncate(@as(u64, @bitCast(l_param)) >> 16);
                 ctx.?.device.?.resize(w, h) catch {};
+                // Tooltip（P0-1）：锚/视口几何已失效，取消显示（下次 hover 重新调度）。
+                ctx.?.tip.hide(&ctx.?.ticker);
+                syncTickTimer(ctx.?);
                 ctx.?.tree.root.invalidateMeasure();
                 // 触发重绘。
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);

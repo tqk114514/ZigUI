@@ -37,6 +37,14 @@ fn addButton(t: *T, row: *ui.core.node.Node, label: []const u8, disabled: bool) 
     try t.appendChild(row, b);
 }
 
+/// 带 tooltip 的按钮（P0-1 弹层）：hover 停留 0.5s 显示浮层，移开/按下消失。
+fn addTipButton(t: *T, row: *ui.core.node.Node, label: []const u8, tip: []const u8) !void {
+    const b = try t.createNode(row);
+    b.widget = .{ .button = .{ .label = try t.allocStr(label) } };
+    try ui.widgets.builder.tooltip(t, b, tip);
+    try t.appendChild(row, b);
+}
+
 /// 复选框（可勾选/禁用）。
 fn addCheckbox(t: *T, row: *ui.core.node.Node, label: []const u8, checked: bool, disabled: bool) !void {
     const c = try t.createNode(row);
@@ -146,6 +154,16 @@ pub fn main() anyerror!void {
     // 输入框（占一行，可 Tab 聚焦体验焦点环 + 光标）。
     try addLabel(&tree, "输入框 EDIT");
     try addEdit(&tree, "hello 世界");
+
+    // Tooltip（P0-1 弹层）：hover 停留 0.5s 显示浮层；移开/按下消失；
+    // 锚贴近视口底/右缘时自动翻转/钳制（滚动内容到窗口边缘可观察）。
+    try addLabel(&tree, "悬浮提示 TOOLTIPS");
+    {
+        const row = try addRow(&tree);
+        try addTipButton(&tree, row, "删除", "删除所选内容（不可撤销）");
+        try addTipButton(&tree, row, "保存", "保存到当前文件");
+        try addTipButton(&tree, row, "长文本", "这是一段较长的提示文本，用于验证浮层的测量与视口钳制行为");
+    }
 
     // 缓存层（§5.6 分层）：两个独立 node.layer 子树并排，各自离屏缓存、互不干扰
     //（批量文本可在 scroll 层里看复用；此处验证多并发静态层正确合成）。

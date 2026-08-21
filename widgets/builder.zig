@@ -87,3 +87,9 @@ pub fn slider(tree: *node.Tree, parent: *node.Node, value: f32, min: f32, max: f
 pub fn setNodeId(tree: *node.Tree, n: *node.Node, id: []const u8) !void {
     n.id = try tree.allocStr(id);
 }
+
+/// 给节点设置 tooltip 文本（拷贝入 arena，L5）：hover 停留 0.5s 后于锚附近显示浮层，
+/// 移开/按下/失焦消失（P0-1 弹层）。容器设置时其子节点 hover 同样生效（沿祖先找 tip）。
+pub fn tooltip(tree: *node.Tree, n: *node.Node, str: []const u8) !void {
+    n.tip = try tree.allocStr(str);
+}
