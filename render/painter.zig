@@ -288,7 +288,8 @@ fn implPaintLayer(impl: *anyopaque, t: *node.Tree, n: *node.Node, pc: painter.Pa
 /// 坐标：布局子树 rect 已是父（根）坐标；absolute 子由 core arrange 从 hand_rect 提升，同样父坐标。
 fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
     const view = n.rect;
-    if (view.w <= 0 or view.h <= 0 or n.children.len == 0) return false;
+    // 纯背景层也允许（children 可为空）：背景/边框由本函数并入位图，随合成 alpha/scale/mask 生效。
+    if (view.w <= 0 or view.h <= 0) return false;
     const node_id: usize = @intFromPtr(n);
     const view_w = view.w;
     const view_h = view.h;
@@ -318,6 +319,9 @@ fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     // 栅化：把该子树画到离屏位图（本地坐标对齐位图原点，对齐物理像素）。
     const dpi = 96.0 * dev.dpi_scale;
     const sdc = sf.dc.?;
+    // 绑定目标：DeviceContext 未设 target 时 BeginDraw 返回 DRAW_TARGET_NOT_SET，层内容落不进位图
+    //（否则整层静默降级为普通不透明绘制，alpha/scale/圆角全失效）。用完 sdc.SetTarget(null) 解绑。
+    sdc.SetTarget(&sf.bitmap.?.ID2D1Image);
     const srt = &sdc.ID2D1RenderTarget;
     srt.SetDpi(dpi, dpi);
     const sc = dev.dpi_scale;
@@ -332,6 +336,12 @@ fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     srt.Clear(&d2d.common.D2D_COLOR_F{ .r = 0, .g = 0, .b = 0, .a = 0 });
     var sp = D2DPainter{ .device = dev, .sf = sf };
     const spc = sp.ctx(pc.theme_ref);
+    // 层内容 = 本节点背景/边框（并入位图，随合成 alpha/scale/mask 一体生效，见 paintNode 约定）
+    // + 子内容。transform 已折 -view 偏移 → view 落表面(0,0)。
+    if (n.style.bg) |bg| spc.fillRect(view, bg);
+    if (n.style.border_color) |bc| {
+        if (n.style.border_width > 0) spc.strokeRect(view, bc, n.style.border_width, pc.theme_ref.radius.small);
+    }
     t.paintChildrenInto(spc, n, view);
     const herr = srt.EndDraw(null, null);
     sdc.SetTarget(null);
@@ -346,6 +356,58 @@ fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     sf.dirty = false;
     blitSurface(dev, sf, dest, src, n.layer_alpha, radius);
     return true;
+}
+
+/// scroll 层复用路径下，把子树内嵌套的显式静态层合成进主场景（§5.6）。
+/// 静态层是独立缓存表面，内容不进 scroll 条带；而 scroll 复用直接平移条带、跳过子遍历，
+/// 若不在此补画，这些层只在 scroll 重栅化那帧随 paintChildrenInto 顺带出现，停下即消失。
+/// 同一父下的静态层兄弟必须与 bake 路径（drawChildren，L8/C §5.4）一致按 layer_z **升序**
+/// 合成（z 大者盖在之上，相等保持声明序）——否则复用路径走树序、重栅化走 z 序，
+/// 两个路径画序翻转 → 鼠标移动经过父重栅化时静态层颜色/覆盖闪烁。
+fn compositeNestedStaticLayers(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
+    // 容器的静态层兄弟 ≥2 时按 z 升序（与 drawChildren 的 bubble 规则一致：静态层相邻交换、
+    // 非层为 run 边界不跨界、同 z 稳定）；否则按树序。
+    var layer_cnt: usize = 0;
+    for (n.children) |c| {
+        if (c.layer and c.widget != .scroll) layer_cnt += 1;
+    }
+    if (layer_cnt < 2) {
+        for (n.children) |c| compositePaintChild(dev, t, c, pc);
+        return;
+    }
+    const MAX = 64;
+    var order: [MAX]*node.Node = undefined;
+    const cnt = @min(n.children.len, MAX);
+    for (n.children[0..cnt], 0..) |c, i| order[i] = c;
+    var i: usize = 0;
+    while (i < cnt) : (i += 1) {
+        if (!(order[i].layer and order[i].widget != .scroll)) continue;
+        var j = i;
+        while (j > 0) {
+            const prev = order[j - 1];
+            const cur = order[j];
+            if (!(prev.layer and prev.widget != .scroll)) break; // run 边界。
+            if (!(prev.layer_z > cur.layer_z)) break; // 相邻已有序（含同 z 稳定）。
+            order[j - 1] = cur;
+            order[j] = prev;
+            j -= 1;
+        }
+    }
+    for (order[0..cnt]) |c| compositePaintChild(dev, t, c, pc);
+    var k = cnt;
+    while (k < n.children.len) : (k += 1) compositePaintChild(dev, t, n.children[k], pc);
+}
+
+/// compositeNestedStaticLayers 的单个子处理步进：可见且与主场景当前裁剪相交才绘制；
+/// 显式静态层调宿主绘制（自含背景/边框/子内容，不继续下钻）；其余非 scroll 容器下钻寻层。
+fn compositePaintChild(dev: *device_mod.Device, t: *node.Tree, c: *node.Node, pc: painter.PaintCtx) void {
+    if (!c.flags.visible) return;
+    if (!pc.clipIntersects(c.rect)) return;
+    if (c.layer and c.widget != .scroll) {
+        _ = t.layer_host.?.vtable.paintLayer(t.layer_host.?.impl, t, c, pc);
+    } else if (c.widget != .scroll) {
+        compositeNestedStaticLayers(dev, t, c, pc);
+    }
 }
 
 /// 滚动层离屏绘制（scroll widget，§5.6 光栅缓存）：未命中条带则整条带重栅化到离屏位图，
@@ -373,12 +435,18 @@ fn implScrollLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
         if (sf.bitmap != null) {
             blitSurface(dev, sf, view_win, .{ .x = 0, .y = reuse_src_y, .w = view_w, .h = view_h }, n.layer_alpha, 0);
         }
+        // 复用路径跳过了子遍历（§5.6 条带平移），但子树里嵌套的显式静态层是**独立缓存表面**、
+        // 不被 bake 进条带；若复用时不把它们合成进主场景，它们只在父重栅化那帧随 paintChildrenInto
+        // 顺带出现，鼠标停下（scroll 进复用）就消失。故复用也要下钻子树、对每个静态层调宿主绘制。
+        compositeNestedStaticLayers(dev, t, n, pc);
         return true;
     }
 
     // —— 重栅化：把当前可见区放条带中央，整条带光栅化到离屏位图 ——
     const dpi = 96.0 * dev.dpi_scale;
     const sdc = sf.dc.?;
+    // 绑定目标（同 implStaticLayer）：DeviceContext 未设 target 时 BeginDraw 失败，条带落不进位图。
+    sdc.SetTarget(&sf.bitmap.?.ID2D1Image);
     const srt = &sdc.ID2D1RenderTarget;
     srt.SetDpi(dpi, dpi);
     // 表面坐标 = 本地坐标 + (dx, dy)：把条带原点折到表面 (0,0)，children（本地坐标）随之落入条带。
@@ -442,8 +510,8 @@ fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
     const s = geometry.Rect{
         .x = @as(f32, @floatFromInt(geometry.snap(src.x * scale))) / scale,
         .y = @as(f32, @floatFromInt(geometry.snap(src.y * scale))) / scale,
-        .w = w,
-        .h = h,
+        .w = src.w,
+        .h = src.h,
     };
     if (radius > 0) {
         // 圆角合成（C）：PushLayer + ID2D1RoundedRectangleGeometry 几何遮罩，裁剪合成层四角。

@@ -763,11 +763,17 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
     if (!n.flags.visible) return;
     if (!pc.clipIntersects(n.rect)) return;
 
-    // Node 层统一绘制背景与边框（控件不得重复实现描边，§5.3）。
-    if (n.style.bg) |bg| pc.fillRect(n.rect, bg);
-    if (n.style.border_color) |bc| {
-        if (n.style.border_width > 0) {
-            pc.strokeRect(n.rect, bc, n.style.border_width, t.theme_ref.radius.small);
+    // 显式 node.layer 的背景/边框不入主场景：它们属于层内容本身，由宿主并入离屏位图随合成
+    // alpha/scale/mask 一体生效（C 层合成）——否则背景以全色整块贴主场景、半透明/缩放只作用于
+    // 子内容，观感失效。scroll 层不使用这些合成属性（条带仅含子内容），仍在此画背景。
+    const explicit_layer = n.layer and n.widget != .scroll;
+    if (!explicit_layer) {
+        // Node 层统一绘制背景与边框（控件不得重复实现描边，§5.3）。
+        if (n.style.bg) |bg| pc.fillRect(n.rect, bg);
+        if (n.style.border_color) |bc| {
+            if (n.style.border_width > 0) {
+                pc.strokeRect(n.rect, bc, n.style.border_width, t.theme_ref.radius.small);
+            }
         }
     }
 
@@ -776,6 +782,13 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
     if (isLayerNode(n)) {
         if (t.layer_host) |lh| {
             if (lh.vtable.paintLayer(lh.impl, t, n, pc)) return;
+        }
+        // 宿主缺失或未处理（失败退化）：显式层背景在此兜底，保证可见。
+        if (explicit_layer) {
+            if (n.style.bg) |bg| pc.fillRect(n.rect, bg);
+            if (n.style.border_color) |bc| {
+                if (n.style.border_width > 0) pc.strokeRect(n.rect, bc, n.style.border_width, t.theme_ref.radius.small);
+            }
         }
     }
 

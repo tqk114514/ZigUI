@@ -75,6 +75,39 @@ fn addCBox(t: *T, parent: *ui.core.node.Node, txt: []const u8, color: theme.Colo
     try t.appendChild(l, tx);
 }
 
+/// 定尺寸绝对定位区域（custom 测量）：其 children 用 hand_rect 重叠排布（手填矩形，父内容区局部
+/// 坐标，§5.3 由 arrange 提升为根空间）——演示 alpha/z 重叠所需的绝对定位容器。
+const AreaCtx = struct {
+    size: ui.core.geometry.Size,
+    vtable: ui.core.widget.CustomVTable = .{ .measure = measure },
+    fn measure(ctx: *anyopaque, c: ui.core.layout.Constraints) ui.core.geometry.Size {
+        const self: *AreaCtx = @ptrCast(@alignCast(ctx));
+        return c.constrain(self.size);
+    }
+};
+fn addArea(t: *T, w: f32, h: f32) !*ui.core.node.Node {
+    const ctx = try t.alloc(AreaCtx);
+    ctx.* = .{ .size = .{ .width = w, .height = h } };
+    const c = try t.createNode(t.root);
+    c.widget = .{ .custom = .{ .ctx = ctx, .vtable = &ctx.vtable } };
+    c.layout = .{ .none = {} };
+    try t.appendChild(t.root, c);
+    return c;
+}
+
+/// 绝对定位的纯色静态层盒（C 重叠演示）：layer + alpha/scale/z 合成属性，位置由 hand_rect 手填。
+/// 无文字（避免遮挡重叠区观察），仅色块。
+fn addOvlBox(t: *T, parent: *ui.core.node.Node, hr: ui.core.geometry.Rect, color: theme.Color, alpha: f32, scale: f32, z: f32) !void {
+    const l = try t.createNode(parent);
+    l.layer = true;
+    l.layer_alpha = alpha;
+    l.layer_scale = scale;
+    l.layer_z = z;
+    l.hand_rect = hr;
+    l.style = .{ .bg = color, .padding = .all(theme.light.spacing.xs) };
+    try t.appendChild(parent, l);
+}
+
 pub fn main() anyerror!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -136,27 +169,26 @@ pub fn main() anyerror!void {
         _ = try LayerBox.box(&tree, row, "静态层 B");
     }
 
-    // 层合成增强 C：node.layer 的 alpha / scale / z 合成属性演示（层盒由布局容器排布）。
-    try addLabel(&tree, "层合成 ALPHA（半透明层透出下面深色行底色）");
+    // 层合成增强 C：node.layer 的 alpha / scale / z 合成属性演示。
+    try addLabel(&tree, "层合成 ALPHA（右盒半透明 0.5 叠在左盒上→重叠区透出底下 danger 色）");
     {
-        const row = try addRow(&tree);
-        row.style = .{ .bg = theme.light.text }; // 深底色，衬托半透明透出。
-        try addCBox(&tree, row, "不透明 1.0", theme.light.danger, 1.0, 1.0, 0);
-        try addCBox(&tree, row, "半透明 0.5", theme.light.accent, 0.5, 1.0, 0);
+        const area = try addArea(&tree, 340, 52);
+        try addOvlBox(&tree, area, .{ .x = 0, .y = 4, .w = 170, .h = 40 }, theme.light.danger, 1.0, 1.0, 0); // 底层：不透明
+        try addOvlBox(&tree, area, .{ .x = 80, .y = 4, .w = 170, .h = 40 }, theme.light.accent, 0.5, 1.0, 1); // 上层半透明
     }
 
-    try addLabel(&tree, "层合成 SCALE（右为缩放 0.8，同内容更小）");
+    try addLabel(&tree, "层合成 SCALE（右为缩放 0.5，同内容明显更小）");
     {
         const row = try addRow(&tree);
         try addCBox(&tree, row, "缩放 1.0", theme.light.accent, 1.0, 1.0, 0);
-        try addCBox(&tree, row, "缩放 0.8", theme.light.accent, 1.0, 0.8, 0);
+        try addCBox(&tree, row, "缩放 0.5", theme.light.accent, 1.0, 0.5, 0);
     }
 
-    try addLabel(&tree, "层合成 Z（z 排序层属性；并排展示两盒）");
+    try addLabel(&tree, "层合成 Z（重叠区 A(z=2) 盖在 B(z=1) 之上→显 accent 蓝；z 越大越靠上）");
     {
-        const row = try addRow(&tree);
-        try addCBox(&tree, row, "A z=2", theme.light.accent, 1.0, 1.0, 2);
-        try addCBox(&tree, row, "B z=1", theme.light.danger, 1.0, 1.0, 1);
+        const area = try addArea(&tree, 340, 52);
+        try addOvlBox(&tree, area, .{ .x = 0, .y = 4, .w = 160, .h = 40 }, theme.light.accent, 1.0, 1.0, 2); // A z=2（声明在前）
+        try addOvlBox(&tree, area, .{ .x = 70, .y = 4, .w = 160, .h = 40 }, theme.light.danger, 1.0, 1.0, 1); // B z=1（声明在后）
     }
 
     const title = std.unicode.utf8ToUtf16LeStringLiteral("ZigUI DEMO");

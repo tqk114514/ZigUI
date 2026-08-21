@@ -112,10 +112,12 @@ pub fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
         .key_down => |k| handleKey(tree, n, d, k),
         .text_input => |ti| {
             insertText(tree, d, ti.text);
+            n.invalidatePaint(); // 提交到 buf 后必须失效：在 scroll 下层时驱动其离屏条带重栅化（§5.6）。
             return true;
         },
         .ime_compose => |ic| {
             updateCompose(tree, d, ic.text);
+            n.invalidatePaint();
             return true;
         },
         .pointer_down => |p| handlePointerDown(tree, n, d, p),

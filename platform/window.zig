@@ -936,8 +936,9 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_TIMER => {
             if (ctx != null and w_param == TIMER_CARET) {
                 ctx.?.tree.caret_blink_on = !ctx.?.tree.caret_blink_on;
-                // 只重绘焦点 Edit 的局部脏区（§5.4）：其余像素复用。
-                if (ctx.?.tree.focus) |f| ctx.?.tree.markDirtyRect(f.rect);
+                // 只重绘焦点 Edit（§5.4）：invalidatePaint 一并失效其所在 scroll 层条带，
+                // 否则缓存复用把上一 bake 的光标状态冻住、不闪烁（§5.6 动态元素须失效宿主表面）。
+                if (ctx.?.tree.focus) |f| f.invalidatePaint();
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
             }
             return 0;
