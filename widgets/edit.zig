@@ -99,7 +99,8 @@ pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node, d: widget.Ed
 
     // 光标（§5.8）：统一受闪烁相位控制——空闲时持续闪烁（组合时在组合串末尾）；
     // 连续动作时 syncCaretTimer 把 blink 置 true 恒显示，停止后 WM_TIMER 恢复闪烁。
-    if (focus and tree.caret_blink_on) {
+    // 有选区（双击选词/拖拽选中，has_selection 态）时不画光标：选区背景已标示插入位置。
+    if (focus and tree.caret_blink_on and d.anchor == d.caret) {
         const cx = if (d.composing) compose_x + compose_w else prefixWidth(ts, &th.font_ui, d.buf, d.caret);
         pc.fillRect(.{ .x = content.x + cx, .y = content.y, .w = caret_w, .h = content.h }, th.text);
     }

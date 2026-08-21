@@ -590,8 +590,13 @@ fn snapRectToPixels(r: geometry.Rect, scale: f32) geometry.Rect {
     if (scale <= 0) return r;
     const x = @as(f32, @floatFromInt(geometry.snap(r.x * scale))) / scale;
     const y = @as(f32, @floatFromInt(geometry.snap(r.y * scale))) / scale;
-    const x2 = @as(f32, @floatFromInt(geometry.snap((r.x + r.w) * scale))) / scale;
-    const y2 = @as(f32, @floatFromInt(geometry.snap((r.y + r.h) * scale))) / scale;
+    // 亚像素 hairline（如光标 caret_w=1.5 这类 <2px 的细条）：右/下边界相对左/上固定取 1 物理像素，
+    // 否则各边独立取整会让 1px/2px 随位置（光标 cx 小数部分跨像素边界）往复抖动、粗细闪烁。
+    // 正常宽矩形（≥2px）不受影响，照常各边取整。
+    const pw = r.w * scale;
+    const ph = r.h * scale;
+    const x2 = if (pw >= 2.0 or pw <= 0) @as(f32, @floatFromInt(geometry.snap((r.x + r.w) * scale))) / scale else x + 1.0 / scale;
+    const y2 = if (ph >= 2.0 or ph <= 0) @as(f32, @floatFromInt(geometry.snap((r.y + r.h) * scale))) / scale else y + 1.0 / scale;
     return .{ .x = x, .y = y, .w = x2 - x, .h = y2 - y };
 }
 
@@ -615,6 +620,13 @@ test "snapRectToPixels aligns edges to pixel grid" {
     // 负数对称。
     const r3 = snapRectToPixels(.{ .x = -10.5, .y = -10.5, .w = 4.0, .h = 4.0 }, 1.0);
     try std.testing.expect(geometry.approxEq(r3.x, -11));
+    // 亚像素 hairline（光标 caret_w=1.5）：无论左边界落在哪个整数像素，宽度固定 1px（不随位置抖动）。
+    const rh = snapRectToPixels(.{ .x = 10.5, .y = 3.2, .w = 1.5, .h = 1.0 }, 1.0);
+    try std.testing.expect(geometry.approxEq(rh.x, 11)); // 左边界仍对齐像素。
+    try std.testing.expect(geometry.approxEq(rh.w, 1)); // 固定 1px，而不是 1/2px 抖动。
+    try std.testing.expect(geometry.approxEq(rh.h, 1));
+    const rh2 = snapRectToPixels(.{ .x = 10.8, .y = 5.6, .w = 1.5, .h = 1.0 }, 1.0);
+    try std.testing.expect(geometry.approxEq(rh2.w, 1));
     // 退化 scale。
     const r0 = snapRectToPixels(.{ .x = 1.5, .y = 1.5, .w = 2.0, .h = 2.0 }, 0.0);
     try std.testing.expect(geometry.approxEq(r0.x, 1.5));
