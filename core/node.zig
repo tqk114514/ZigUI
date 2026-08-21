@@ -68,6 +68,10 @@ pub const Node = struct {
     children: []*Node = &.{},
     /// 父节点回指针（事件冒泡用）。
     parent: ?*Node = null,
+    /// 是否提升为独立缓存层（§5.6 光栅缓存/分层）：置 true 后本节点子树被栅格化到离屏层、
+    /// 以层变换（平移）合成到主场景；内容变化时层失效重栅化，仅变换（如滚动平移）不重栅化。
+    /// 提供宿主（tree.layer_host）时生效；scroll 由 widget 隐式成为层。
+    layer: bool = false,
     /// 控件数据（Widget union）。
     widget: widget.Widget = .none,
     /// 测量脏标记（invalidateMeasure 沿祖先链置位）。
@@ -105,7 +109,7 @@ pub const Node = struct {
     pub fn invalidatePaint(n: *Node) void {
         n.dirty_paint = true;
         if (n.tree) |t| t.markDirtyRect(n.rect);
-        notifyScrollSurface(n);
+        notifyLayerInvalid(n);
     }
 
     /// 仅标脏自身绘制并并入树脏区，不失效任何 scroll 离屏表面（§5.6）。
@@ -159,18 +163,19 @@ pub const DispatchTable = struct {
     onEvent: *const fn (tree: *Tree, n: *Node, e: *const event.Event) bool,
 };
 
-/// 滚动容器离屏表面宿主（§5.6 光栅缓存）：render 层实现，core 只持接口（L1，core 不触渲染）。
-/// paintNode 遇到 scroll 节点且有宿主时，把子树绘制委托给宿主（离屏栅格化 + DrawSurface 平移复用）。
-pub const ScrollSurfaceHost = struct {
+/// 层宿主（§5.6 光栅缓存/分层）：render 层实现，core 只持接口（L1，core 不触渲染）。
+/// paintNode 遇到层节点（scroll 或 node.layer）且有宿主时，把子树绘制委托给宿主
+/// （离屏栅格化 + 层变换合成/平移复用）。
+pub const LayerHost = struct {
     /// 实现 vtable。
     vtable: *const VTable,
     /// 实现实例（render 的 Device 等）。
     impl: *anyopaque,
     pub const VTable = struct {
-        /// 用（或重栅化）离屏缓存绘制 scroll 节点 n 的子内容，并把缓存位图绘制到主场景 pc。
+        /// 用（或重栅化）离屏缓存绘制层节点 n 的子内容，并把层位图按层变换绘制到主场景 pc。
         /// 返回 true = 已处理，paintNode 应跳过默认的子递归。
-        paintScroll: *const fn (impl: *anyopaque, tree: *Tree, n: *Node, pc: painter.PaintCtx) bool,
-        /// 通知宿主：n（scroll）内容/几何已变化，其离屏缓存已失效，下次绘制须重栅化。
+        paintLayer: *const fn (impl: *anyopaque, tree: *Tree, n: *Node, pc: painter.PaintCtx) bool,
+        /// 通知宿主：n（层节点）内容/几何已变化，其离屏缓存已失效，下次绘制须重栅化。
         invalidate: *const fn (impl: *anyopaque, n: *Node) void,
     };
 };
@@ -195,8 +200,8 @@ pub const Tree = struct {
     theme_ref: *const theme.Theme,
     /// 文本系统（§5.7）：text 控件 measure 消费 bounds。默认 null（无文本能力）。
     text_system: ?painter.TextSystem = null,
-    /// 滚动容器离屏表面宿主（§5.6 光栅缓存）：render 安装实现；null = 走默认子递归绘制。
-    scroll_surface: ?ScrollSurfaceHost = null,
+    /// 层宿主（§5.6 光栅缓存/分层）：render 安装实现；null = 层节点走默认子递归绘制。
+    layer_host: ?LayerHost = null,
     /// 剪贴板接口（§5.11）：platform 装配实现，Edit 复制/粘贴经此（widgets 不碰平台）。
     clipboard: ?Clipboard = null,
     /// 控件行为分发表（§5.4）。默认 null（无内建控件行为）。
@@ -714,15 +719,20 @@ fn colorEq(a: theme.Color, b: theme.Color) bool {
     return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
 }
 
-/// 失效 n 所在 scroll 的离屏表面（文件级辅助，§5.6）。从 n 向上找最近 scroll 祖先，
-/// 命中且有宿主则通知 invalidate（重栅化）。无宿主或无 scroll 祖先则 no-op。
-fn notifyScrollSurface(n: *Node) void {
+/// 是否层节点（§5.6 光栅缓存/分层）：scroll 由 widget 隐式成为层；其余子树用 node.layer 显式提升。
+fn isLayerNode(n: *Node) bool {
+    return n.widget == .scroll or n.layer;
+}
+
+/// 失效 n 所在的最近层宿主的离屏缓存（文件级辅助，§5.6）。从 n 向上找最近层节点祖先，
+/// 命中且有宿主则通知 invalidate（重栅化）。无宿主或无层祖先则 no-op。
+fn notifyLayerInvalid(n: *Node) void {
     const t = n.tree orelse return;
-    const ss = t.scroll_surface orelse return;
+    const lh = t.layer_host orelse return;
     var cur: ?*Node = n;
     while (cur) |c| {
-        if (c.widget == .scroll) {
-            ss.vtable.invalidate(ss.impl, c);
+        if (isLayerNode(c)) {
+            lh.vtable.invalidate(lh.impl, c);
             return;
         }
         cur = c.parent;
@@ -743,10 +753,11 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
         }
     }
 
-    // 滚动容器：有离屏表面宿主则交由宿主绘制（光栅缓存，§5.6）；宿主处理成功则跳过默认子递归。
-    if (n.widget == .scroll) {
-        if (t.scroll_surface) |ss| {
-            if (ss.vtable.paintScroll(ss.impl, t, n, pc)) return;
+    // 层节点（scroll / 显式 node.layer）：有层宿主则交由宿主绘制（光栅缓存/分层，§5.6）；
+    // 宿主处理成功则跳过默认子递归。
+    if (isLayerNode(n)) {
+        if (t.layer_host) |lh| {
+            if (lh.vtable.paintLayer(lh.impl, t, n, pc)) return;
         }
     }
 

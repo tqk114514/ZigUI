@@ -253,28 +253,92 @@ fn toD2DRect(r: geometry.Rect) d2d.common.D2D_RECT_F {
     return .{ .left = r.x, .top = r.y, .right = r.x + r.w, .bottom = r.y + r.h };
 }
 
-/// 装配滚动容器离屏表面宿主（§5.6 光栅缓存）。impl = device。
-pub fn asScrollHost(dev: *device_mod.Device) node.ScrollSurfaceHost {
+/// 装配层宿主（§5.6 光栅缓存/分层）。impl = device。层节点 = scroll（隐式）或 node.layer（显式）。
+pub fn asLayerHost(dev: *device_mod.Device) node.LayerHost {
     return .{
         .vtable = &.{
-            .paintScroll = &implPaintScroll,
+            .paintLayer = &implPaintLayer,
             .invalidate = &implSurfaceInvalidate,
         },
         .impl = dev,
     };
 }
 
-/// 内部：内容/几何变化 → 置脏离屏表面，下帧重栅化（§5.6；滚动偏移变化不经过此路径）。
+/// 内部：内容/几何变化 → 置脏离屏表面，下帧重栅化（§5.6；变换变化——如滚动平移——不经过此路径）。
 fn implSurfaceInvalidate(impl: *anyopaque, n: *node.Node) void {
     _ = n;
     const dev: *device_mod.Device = @ptrCast(@alignCast(impl));
     dev.surface_dirty = true;
 }
 
-/// 滚动容器离屏绘制（§5.6 光栅缓存）：未命中条带则整条带重栅化到离屏位图，
-/// 命中则直接 DrawBitmap 平移复用像素（本帧零文本栅格化）。两路径都返回 true（已处理）。
-fn implPaintScroll(impl: *anyopaque, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
+/// 层节点离屏绘制入口（§5.6 光栅缓存/分层）：scroll 层走条带+平移复用；其余显式 node.layer
+/// 子树走整块静态缓存层。两者都返回 true（已处理，跳过默认子递归）。
+fn implPaintLayer(impl: *anyopaque, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
     const dev: *device_mod.Device = @ptrCast(@alignCast(impl));
+    return if (n.widget == .scroll)
+        implScrollLayer(dev, t, n, pc)
+    else
+        implStaticLayer(dev, t, n, pc);
+}
+
+/// 通用静态缓存层（§5.6 分层）：把 node.layer 子树整体光栅化到离屏位图（节点 rect 大小），
+/// 内容变才重栅化（invalidate）；否则直接 blit 复用。用于任意"静态但父级常变"的子块，
+/// 使其不随父级 hover/变换每帧重绘。注意：本轮为单活动层（与 scroll 层共享单表面，互斥使用；
+/// 完整分层=多并发层池，留后续）。
+fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
+    const view = n.rect;
+    if (view.w <= 0 or view.h <= 0 or n.children.len == 0) return false;
+    const node_id: usize = @intFromPtr(n);
+    const view_w = view.w;
+    const view_h = view.h;
+    const sf = &dev.surface;
+    // 复用：缓存已含该 node 内容 → 直接 blit（内容未变，无平移 offset）。
+    if (!dev.surface_dirty and sf.node_id == node_id and
+        geometry.approxEq(sf.view_w, view_w) and geometry.approxEq(sf.view_h, view_h))
+    {
+        if (sf.bitmap != null) blitSurface(dev, view, .{ .x = 0, .y = 0, .w = view_w, .h = view_h });
+        return true;
+    }
+    // 栅化：把该子树画到离屏位图（本地坐标对齐位图原点，对齐物理像素）。
+    const dpi = 96.0 * dev.dpi_scale;
+    const px_w: u32 = @intFromFloat(std.math.ceil(view_w * dev.dpi_scale));
+    const px_h: u32 = @intFromFloat(std.math.ceil(view_h * dev.dpi_scale));
+    dev.beginSurface(px_w, px_h) catch return false;
+    const sdc = dev.surface.dc.?;
+    const srt = &sdc.ID2D1RenderTarget;
+    srt.SetDpi(dpi, dpi);
+    const sc = dev.dpi_scale;
+    const dx = @as(f32, @floatFromInt(geometry.snap(-view.x * sc))) / sc;
+    const dy = @as(f32, @floatFromInt(geometry.snap(-view.y * sc))) / sc;
+    var mat = d2d.common.D2D_MATRIX_3X2_F{
+        .Anonymous = .{ .Anonymous1 = .{ .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = dx, .dy = dy } },
+    };
+    srt.SetTransform(&mat);
+    srt.BeginDraw();
+    // 透明填充：露出主场景已绘的背景（Node 层绘制）。
+    srt.Clear(&d2d.common.D2D_COLOR_F{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    var sp = D2DPainter{ .device = dev, .surf = true };
+    const spc = sp.ctx(pc.theme_ref);
+    t.paintChildrenInto(spc, n, view);
+    const herr = srt.EndDraw(null, null);
+    sdc.SetTarget(null);
+    dev.surface.in_use = false;
+    if (herr.failed) {
+        dev.surface_dirty = true;
+        return false;
+    }
+    sf.node_id = node_id;
+    sf.view_w = view_w;
+    sf.view_h = view_h;
+    sf.anchor_off = 0;
+    dev.surface_dirty = false;
+    blitSurface(dev, view, .{ .x = 0, .y = 0, .w = view_w, .h = view_h });
+    return true;
+}
+
+/// 滚动层离屏绘制（scroll widget，§5.6 光栅缓存）：未命中条带则整条带重栅化到离屏位图，
+/// 命中则直接 DrawBitmap 平移复用像素（本帧零文本栅格化）。返回 true（已处理）。
+fn implScrollLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
     const view = n.rect.inset(n.style.padding); // 视口（DIP，scroll 本地坐标）。
     if (view.w <= 0 or view.h <= 0 or n.children.len == 0) return false; // 无可见视口/内容 → 走默认递归
     const off = n.widget.scroll.offset_y;

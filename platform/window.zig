@@ -185,8 +185,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     const device = try device_mod.Device.init(std.heap.page_allocator, hwnd);
     defer device.deinit();
     tree.text_system = text_mod.asTextSystem(&device.text_system);
-    // 装配滚动容器离屏表面宿主（§5.6 光栅缓存）：滚动内容缓存到离屏位图，滚动平移复用像素。
-    tree.scroll_surface = painter_mod.asScrollHost(device);
+    // 装配层宿主（§5.6 光栅缓存/分层）：层节点内容缓存到离屏位图，变换（滚动平移）合成复用像素。
+    tree.layer_host = painter_mod.asLayerHost(device);
 
     // 5b. 创建跨线程任务桥（§5.12），绑定 hwnd。
     const bridge = try std.heap.page_allocator.create(post_mod.PostBridge);
