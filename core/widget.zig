@@ -76,12 +76,43 @@ pub const Edit = struct {
 /// - 滚动 = 改 offset_y + invalidateLayout 强制 arrange 重排（仅改显示不改尺寸，
 ///   传播终止 §5.5 的例外）；paint 由 clipIntersects 剔除视口外内容（§5.4）；
 /// - content_h 在 arrange 时刷新（内容总高，钳制 offset 用）；
-/// - v1 只做纵向（内容布局为 column）；TODO(M7)：水平滚动与可见滚动条。
+/// - v1 只做纵向（内容布局为 column）；TODO(v2)：水平滚动；
+/// - 可视滚动条拇指（§6 P0-3）：thumb_drag / thumb_grab_off / thumb_hover 只由事件路径写（L6）；
+///   几何经 thumbRect 供 paint 与 core 事件路由共用——拇指是**视口固定覆盖层**，不随内容滚。
 pub const Scroll = struct {
     /// 内容坐标纵向偏移（DIP），恒 ≥ 0。
     offset_y: f32 = 0,
     /// 内容总高（DIP，含 padding），arrange 时刷新。
     content_h: f32 = 0,
+    /// 拇指拖拽中（pointer_down 起、pointer_up 止，§6 P0-3）。
+    thumb_drag: bool = false,
+    /// 按下时指针在拇指内的纵向偏移（DIP）：拖动保持抓取点不跳变。
+    thumb_grab_off: f32 = 0,
+    /// 拇指悬停态（pointer_move 沿祖先更新；拇指非节点命中，Tree.hover 单值指针覆盖不到）。
+    thumb_hover: bool = false,
+
+    /// 拇指宽度（DIP；pub 供 paint 取圆角半径）。
+    pub const thumb_w: f32 = 8;
+    /// 拇指距视口右缘间隙（DIP）。
+    const thumb_gap: f32 = 2;
+    /// 拇指最小高（DIP）：内容极多时保持可抓取。
+    const thumb_min_h: f32 = 24;
+
+    /// 拇指矩形（根空间 DIP，view = 视口即 n.rect.inset(padding)）：内容未超出视口返回 null。
+    /// 高 = 视口高² ÷ 内容高（下限 thumb_min_h、上限视口高）；y 随 offset 比例平移（行程 = 视口高 − 拇指高）。
+    pub fn thumbRect(self: Scroll, view: geo.Rect) ?geo.Rect {
+        if (self.content_h <= view.h + 0.001) return null;
+        const max_off = self.content_h - view.h;
+        const frac = std.math.clamp(self.offset_y / max_off, 0, 1);
+        const h = @min(@max(view.h * view.h / self.content_h, thumb_min_h), view.h);
+        const travel = @max(0, view.h - h);
+        return .{
+            .x = view.x + view.w - thumb_w - thumb_gap,
+            .y = view.y + travel * frac,
+            .w = thumb_w,
+            .h = h,
+        };
+    }
 };
 
 /// 复选框数据（M6）。

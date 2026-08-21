@@ -521,6 +521,22 @@ pub const Tree = struct {
                     t.hover = hover_target;
                     if (hover_target) |n| n.invalidatePaint();
                 }
+                // 拇指悬停态（§6 P0-3）：拇指是视口固定覆盖层、非节点命中，hover 单值指针
+                // 覆盖不到——沿祖先更新各 scroll 的 thumb_hover，变化即重绘该 scroll。
+                if (hit) |h| {
+                    var cur: ?*Node = h;
+                    while (cur) |c| {
+                        if (c.widget == .scroll) {
+                            const d = &c.widget.scroll;
+                            const in_thumb = thumbHit(c, p.pos);
+                            if (d.thumb_hover != in_thumb) {
+                                d.thumb_hover = in_thumb;
+                                c.invalidatePaint();
+                            }
+                        }
+                        cur = c.parent;
+                    }
+                }
                 // 拖选：active 的 Edit 处理 pointer_move（即使移出边界）。
                 if (t.active) |a| {
                     if (t.dispatch_table) |dt| {
@@ -536,6 +552,19 @@ pub const Tree = struct {
                     if (t.focus != null) t.setFocus(null);
                     return false;
                 };
+                // 滚动条拇指（§6 P0-3）：命中测试落到内容子节点上，此处按几何沿祖先找
+                // 拇指含此点的 scroll，先于内容处理——active=该 scroll，拖动中 move/up 经
+                // active 路由回它；消费则不转移焦点（滚动条是 chrome，非内容交互）。
+                if (t.dispatch_table) |dt| {
+                    var cur: ?*Node = hit;
+                    while (cur) |c| {
+                        if (c.widget == .scroll and thumbHit(c, p.pos)) {
+                            t.active = c;
+                            if (dt.onEvent(t, c, e)) return true;
+                        }
+                        cur = c.parent;
+                    }
+                }
                 t.active = hit;
                 hit.invalidatePaint();
                 // 点击 focusable 节点转移焦点（焦点环，§5.3）；点击非 focusable
@@ -742,6 +771,14 @@ fn isLayerNode(n: *Node) bool {
     return n.widget == .scroll or n.layer;
 }
 
+/// 指针是否落在 scroll 的滚动条拇指内（§6 P0-3 可视滚动条）：拇指是视口固定覆盖层，
+/// 命中测试找到的是内容子节点，此处按几何判定（几何在 core/widget.zig 的 Scroll.thumbRect）。
+fn thumbHit(n: *Node, pos: geo.Point) bool {
+    const d = n.widget.scroll;
+    const tr = d.thumbRect(n.rect.inset(n.style.padding)) orelse return false;
+    return tr.contains(pos);
+}
+
 /// 失效 n 所在的最近层宿主的离屏缓存（文件级辅助，§5.6）。从 n 向上找最近层节点祖先，
 /// 命中且有宿主则通知 invalidate（重栅化）。无宿主或无层祖先则 no-op。
 fn notifyLayerInvalid(n: *Node) void {
@@ -778,10 +815,16 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
     }
 
     // 层节点（scroll / 显式 node.layer）：有层宿主则交由宿主绘制（光栅缓存/分层，§5.6）；
-    // 宿主处理成功则跳过默认子递归。
+    // 宿主处理成功则跳过默认子递归——scroll 的视口固定覆盖层（滚动条拇指）在条带 blit
+    // 之后补画（不随内容滚，§6 P0-3）。
     if (isLayerNode(n)) {
         if (t.layer_host) |lh| {
-            if (lh.vtable.paintLayer(lh.impl, t, n, pc)) return;
+            if (lh.vtable.paintLayer(lh.impl, t, n, pc)) {
+                if (n.widget == .scroll) {
+                    if (t.dispatch_table) |d| d.paintWidget(t, n, pc);
+                }
+                return;
+            }
         }
         // 宿主缺失或未处理（失败退化）：显式层背景在此兜底，保证可见。
         if (explicit_layer) {
@@ -792,14 +835,22 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
         }
     }
 
-    // 控件自身内容。
-    if (t.dispatch_table) |d| d.paintWidget(t, n, pc);
+    // 控件自身内容（scroll 例外：其 paintWidget 是视口覆盖层，退化路径画在内容之后）。
+    const is_scroll = n.widget == .scroll;
+    if (!is_scroll) {
+        if (t.dispatch_table) |d| d.paintWidget(t, n, pc);
+    }
 
     // 内容区裁剪后递归子节点。
     const inner = n.rect.inset(n.style.padding);
     pc.pushClip(inner);
     drawChildren(t, pc, n);
     pc.popClip();
+
+    // scroll 覆盖层（宿主缺失退化路径）：内容之后绘制，与层宿主路径的时序一致。
+    if (is_scroll) {
+        if (t.dispatch_table) |d| d.paintWidget(t, n, pc);
+    }
 }
 
 /// 子节点绘制步进 _Order（C）：记录原始声明序号，供稳定排序保持非层节点相对位置与
@@ -1232,6 +1283,72 @@ test "z sort: contiguous layer run reorders by layer_z, plain siblings keep posi
     try std.testing.expect(colorEq(colors[2], theme.light.danger));
     try std.testing.expect(colorEq(colors[3], theme.light.accent));
     try std.testing.expect(colorEq(colors[4], theme.light.text_weak));
+}
+
+test "scroll thumb: pointer down routes to scroll, drag move follows active (P0-3)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    // 视口 200、内容 400：拇指 (90, 0, 8, 100)。
+    t.root.layout = .{ .column = .{} };
+    t.root.widget = .{ .scroll = .{} };
+    for (0..4) |_| _ = try addFixedLeaf(&t, t.root, .{ .width = 100, .height = 100 });
+    t.ensureLayout(.{ .width = 100, .height = 200 });
+
+    // 假分发表：记录 onEvent 调用（core 不能 import widgets，路由本身用假表验证）。
+    const Fake = struct {
+        var calls: usize = 0;
+        var target: ?*Node = null;
+        fn onEvent(tree: *Tree, n: *Node, e: *const event.Event) bool {
+            _ = tree;
+            _ = e;
+            calls += 1;
+            target = n;
+            return true;
+        }
+        fn measureWidget(tree: *Tree, n: *Node, c: layout.Constraints) geo.Size {
+            _ = tree;
+            _ = n;
+            return c.constrain(.{});
+        }
+        fn paintWidget(tree: *Tree, n: *Node, pc: painter.PaintCtx) void {
+            _ = tree;
+            _ = n;
+            _ = pc;
+        }
+    };
+    t.dispatch_table = &.{
+        .measureWidget = Fake.measureWidget,
+        .paintWidget = Fake.paintWidget,
+        .onEvent = Fake.onEvent,
+    };
+
+    // 按在拇指内（命中是内容叶子，路由按几何送到 scroll）→ 消费、active=scroll、不动焦点。
+    const focus_before = t.focus;
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 94, .y = 50 } } });
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    try std.testing.expect(Fake.target == t.root);
+    try std.testing.expect(t.active == t.root);
+    try std.testing.expect(t.focus == focus_before);
+
+    // 拖动中的 move（指针在别的内容上）也经 active 路由到 scroll。
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 94, .y = 120 } } });
+    try std.testing.expectEqual(@as(usize, 2), Fake.calls);
+    try std.testing.expect(Fake.target == t.root);
+
+    // 拇指外的 down 不路由到 scroll：走常规路径，onEvent 收到的是命中的内容叶子。
+    Fake.calls = 0;
+    _ = t.dispatch(&.{ .pointer_down = .{ .pos = .{ .x = 50, .y = 150 } } });
+    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    try std.testing.expect(Fake.target != t.root);
+
+    // move 更新拇指悬停态（几何判定，非节点命中）。
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 94, .y = 10 } } });
+    try std.testing.expect(t.root.widget.scroll.thumb_hover);
+    _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 50, .y = 10 } } });
+    try std.testing.expect(!t.root.widget.scroll.thumb_hover);
 }
 
 test "find by id" {

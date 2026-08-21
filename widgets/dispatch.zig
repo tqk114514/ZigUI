@@ -41,7 +41,8 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
     };
 }
 
-/// 对叶子控件 paint。同样只在叶子节点调用。
+/// 控件 paint 路由。叶子控件在内容前绘制；scroll 例外——其 paintWidget 是视口固定
+/// 覆盖层（滚动条拇指），由 paintNode 在条带 blit / 子内容**之后**调用（§6 P0-3）。
 fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
     switch (n.widget) {
         .none, .box => {},
@@ -50,7 +51,7 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
         .edit => |d| edit.paint(tree, pc, n, d),
         .checkbox => |d| check.paint(tree, pc, n, d),
         .slider => |d| slider.paint(tree, pc, n, d),
-        .scroll => {}, // scroll 由 paintNode 的 clip/递归处理内容
+        .scroll => scroll.paint(tree, pc, n), // 视口固定覆盖层（滚动条拇指，§6 P0-3；paintNode 在内容后调用）
         .custom => {},
     }
 }
