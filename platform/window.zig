@@ -19,6 +19,7 @@ const geometry = @import("../core/geometry.zig");
 const painter = @import("../core/painter.zig");
 const event = @import("../core/event.zig");
 const widget = @import("../core/widget.zig");
+const ticker_mod = @import("../core/ticker.zig");
 const dispatch = @import("../widgets/dispatch.zig");
 const device_mod = @import("../render/device.zig");
 const painter_mod = @import("../render/painter.zig");
@@ -89,8 +90,12 @@ const WindowCtx = struct {
     frame_hook_ctx: ?*anyopaque = null,
     /// IMM32 输入法上下文（§5.10）。
     ime: ime_mod.Ime = undefined,
-    /// 光标闪烁定时器是否已创建（§5.8：只在聚焦时创建一次，避免每次事件重置导致不闪烁）。
-    caret_timer_active: bool = false,
+    /// 时钟/动画/时机子系统（§5.13 TODO(层树)：核心调度器，纯逻辑）。
+    ticker: ticker_mod.Ticker = .{},
+    /// 是否已挂着惰性唤醒定时器（ticker.hasActive 时才挂，空闲即杀 → 0% CPU，§4.9）。
+    tick_active: bool = false,
+    /// 光标闪烁周期定时器的 Ticker 句柄（无焦点 Edit 时为 null）。
+    caret_timer: ?usize = null,
     /// 透明位图（系统 caret 用：全 0 单色位图，显示不可见但 GetCaretPos 定位有效）。
     caret_bmp: ?w32.gdi.HBITMAP = null,
     /// WM_CHAR 代理对暂存（emoji 等，§5.9：WM_CHAR 是 text_input 唯一来源）。
@@ -111,8 +116,11 @@ const WindowCtx = struct {
     min_dip: geometry.Size = .{ .width = 320, .height = 200 },
 };
 
-/// 光标闪烁定时器 ID（§5.8：WM_TIMER 530ms，仅 focus 时启动）。
-const TIMER_CARET: usize = 1;
+/// 惰性唤醒定时器 ID（§5.13：ticker.hasActive() 时才挂，空闲即杀）。
+const TIMER_TICK: usize = 1;
+/// 唤醒查询粒度（ms）：只用于"到点检查 + 推进"，真正的事件间隔由 Ticker 内 QPC 判定；
+/// 系统默认滚动到 ~15.6ms 即可（不 timeBeginPeriod，省全局系统分辨率开销）。
+const TICK_MS: u32 = 1;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zigui.m0");
 
@@ -503,17 +511,47 @@ fn reportImeCaret(ctx: *WindowCtx) void {
     ctx.ime.updateCaret(client_x, client_y);
 }
 
-/// 焦点是 Edit 时启动光标闪烁定时器，否则销毁（§5.8：WM_TIMER 530ms，仅 focus）。
-/// 定时器只在聚焦时创建一次——WM_TIMER 持续翻转实现闪烁；操作只重置相位为可见
-/// （立即显示光标），不重置定时器（否则连续操作期间不闪烁）。
+/// 单调时钟（秒，QPC）：Ticker 的时间源。精度 ~100ns 级，无需高分辨率定时器
+/// 高频唤醒——唤醒粒度由惰性 WM_TIMER 决定，到期判定与间隔度量一律用本时钟（§5.13）。
+fn nowSeconds() f64 {
+    var freq: w32.foundation.LARGE_INTEGER = undefined;
+    var cnt: w32.foundation.LARGE_INTEGER = undefined;
+    _ = w32.kernel32.QueryPerformanceFrequency(&freq);
+    _ = w32.kernel32.QueryPerformanceCounter(&cnt);
+    const c: f64 = @floatFromInt(cnt.QuadPart);
+    const f: f64 = @floatFromInt(freq.QuadPart);
+    return @max(0.0, c / f);
+}
+
+/// 根据 ticker 是否有活跃工作挂/停惰性唤醒定时器：有则挂，无则杀（空闲 0% CPU，§4.9）。
+fn syncTickTimer(ctx: *WindowCtx) void {
+    const on = ctx.ticker.hasActive();
+    if (on and !ctx.tick_active) {
+        _ = w32.user32.SetTimer(ctx.hwnd, TIMER_TICK, TICK_MS, null);
+        ctx.tick_active = true;
+    } else if (!on and ctx.tick_active) {
+        _ = w32.user32.KillTimer(ctx.hwnd, TIMER_TICK);
+        ctx.tick_active = false;
+    }
+}
+
+/// 光标闪烁回调（§5.8 周期 530ms）：翻转闪烁相位并失效焦点 Edit（驱动其所在 scroll 条带重栅化）。
+fn caretBlinkTick(ctx: ?*anyopaque) void {
+    const c: *WindowCtx = @ptrCast(@alignCast(ctx.?));
+    c.tree.caret_blink_on = !c.tree.caret_blink_on;
+    if (c.tree.focus) |f| f.invalidatePaint();
+}
+
+/// 焦点是 Edit 时注册光标闪烁周期定时，否则注销（§5.8：经统一 Ticker 调度）。
+/// 定时器只在聚焦时注册一次——Ticker 持续翻转实现闪烁；操作只重置相位为可见
+/// （立即显示光标），不重新调度（否则连续操作期间不闪烁）。
 /// 同时创建系统 caret（隐藏，仅供 IME 的 GetCaretPos 定位候选框，§5.10）。
 fn syncCaretTimer(ctx: *WindowCtx) void {
     const is_edit = if (ctx.tree.focus) |f| f.widget == .edit else false;
     if (is_edit) {
         ctx.tree.caret_blink_on = true; // 操作后立即可见。
-        if (!ctx.caret_timer_active) {
-            _ = w32.user32.SetTimer(ctx.hwnd, TIMER_CARET, 530, null);
-            ctx.caret_timer_active = true;
+        if (ctx.caret_timer == null) {
+            ctx.caret_timer = ctx.ticker.setInterval(caretBlinkTick, ctx, 0.53, nowSeconds());
         }
         // 透明位图 caret：全 0 单色位图（0 位显示为背景色），系统即使显示也完全不可见；
         // caret 仍存在，SetCaretPos/GetCaretPos 供 IME 定位候选框（§5.10）。
@@ -526,16 +564,15 @@ fn syncCaretTimer(ctx: *WindowCtx) void {
             _ = w32.user32.CreateCaret(ctx.hwnd, bmp, 1, 1);
         }
     } else {
-        if (ctx.caret_timer_active) {
-            _ = w32.user32.KillTimer(ctx.hwnd, TIMER_CARET);
-            ctx.caret_timer_active = false;
-        }
+        if (ctx.caret_timer) |h| ctx.ticker.clearTimer(h);
+        ctx.caret_timer = null;
         _ = w32.user32.DestroyCaret();
         if (ctx.caret_bmp) |bmp| {
             _ = w32.gdi32.DeleteObject(bmp);
             ctx.caret_bmp = null;
         }
     }
+    syncTickTimer(ctx);
 }
 
 /// 释放 IME 事件分配的文本（§5.10：生命周期 = 当前事件）。空串为字面量，跳过。
@@ -709,11 +746,10 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_KILLFOCUS => {
             if (ctx != null) {
                 // 失活：停止闪烁 + 销毁系统 caret + 停用 IME（强制完成组合）+ 取消 Edit 焦点。
-                if (ctx.?.caret_timer_active) {
-                    _ = w32.user32.KillTimer(hwnd, TIMER_CARET);
-                    ctx.?.caret_timer_active = false;
-                }
+                if (ctx.?.caret_timer) |h| ctx.?.ticker.clearTimer(h);
+                ctx.?.caret_timer = null;
                 _ = w32.user32.DestroyCaret();
+                syncTickTimer(ctx.?); // 无活跃工作则杀惰性唤醒定时器。
                 ctx.?.ime.deactivate();
                 // 失活时若 Edit 在组合：清理组合状态；并取消焦点（不再高亮选中）。
                 if (ctx.?.tree.focus) |f| {
@@ -932,14 +968,13 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
             }
             return 0;
         },
-        // —— WM_TIMER：光标闪烁（§5.8，仅 focus 时 530ms）——
+        // —— WM_TIMER：惰性唤醒定时（§5.13），推进 Ticker（定时回调 + 动画），有则重绘——
         w32.windows_and_messaging.WM_TIMER => {
-            if (ctx != null and w_param == TIMER_CARET) {
-                ctx.?.tree.caret_blink_on = !ctx.?.tree.caret_blink_on;
-                // 只重绘焦点 Edit（§5.4）：invalidatePaint 一并失效其所在 scroll 层条带，
-                // 否则缓存复用把上一 bake 的光标状态冻住、不闪烁（§5.6 动态元素须失效宿主表面）。
-                if (ctx.?.tree.focus) |f| f.invalidatePaint();
-                _ = w32.user32.InvalidateRect(hwnd, null, 0);
+            if (ctx != null and w_param == TIMER_TICK) {
+                const c = ctx.?;
+                const step = c.ticker.advance(nowSeconds());
+                if (step.moved) _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                syncTickTimer(c);
             }
             return 0;
         },
