@@ -22,6 +22,7 @@ const widget = @import("../core/widget.zig");
 const ticker_mod = @import("../core/ticker.zig");
 const dispatch = @import("../widgets/dispatch.zig");
 const tooltip_mod = @import("../widgets/tooltip.zig");
+const menu_mod = @import("../widgets/menu.zig");
 const device_mod = @import("../render/device.zig");
 const painter_mod = @import("../render/painter.zig");
 const text_mod = @import("../render/text.zig");
@@ -97,6 +98,8 @@ const WindowCtx = struct {
     tick_active: bool = false,
     /// Tooltip 控制器（P0-1 弹层）：hover 驱动 + Ticker 延迟 + tree.overlay 浮层。
     tip: tooltip_mod.Controller,
+    /// ContextMenu 控制器（P0-1 弹层）：右键驱动 + 模态过滤 + tree.overlay 浮层。
+    menu: menu_mod.Controller,
     /// 光标闪烁周期定时器的 Ticker 句柄（无焦点 Edit 时为 null）。
     caret_timer: ?usize = null,
     /// 透明位图（系统 caret 用：全 0 单色位图，显示不可见但 GetCaretPos 定位有效）。
@@ -232,6 +235,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .frame_hook_ctx = opts.frame_hook_ctx,
         .ime = .{ .hwnd = hwnd },
         .tip = tooltip_mod.Controller.init(tree),
+        .menu = menu_mod.Controller.init(tree),
         .title_utf8 = title_utf8,
         .titlebar_active = opts.use_titlebar,
         .min_dip = .{ .width = opts.min_width, .height = opts.min_height },
@@ -539,6 +543,18 @@ fn syncTickTimer(ctx: *WindowCtx) void {
     }
 }
 
+/// ContextMenu 模态过滤（P0-1）：菜单显示期间消费事件。若本次事件关闭了菜单
+///（选择/外点/Escape），用最近指针位置合成一次 pointer_move 重算底层 hover——
+/// 模态期间的 move 不进树，hover 冻结在打开前的节点上（按钮残留悬停视觉）。
+/// 返回 true = 事件已消费（不得再进树分发）。
+fn menuFilter(ctx: *WindowCtx, e: *event.Event) bool {
+    if (!ctx.menu.filter(e)) return false;
+    if (!ctx.menu.visible()) {
+        _ = ctx.tree.dispatch(&.{ .pointer_move = .{ .pos = ctx.tree.pointer_pos } });
+    }
+    return true;
+}
+
 /// 光标闪烁回调（§5.8 周期 530ms）：翻转闪烁相位并失效焦点 Edit（驱动其所在 scroll 条带重栅化）。
 fn caretBlinkTick(ctx: ?*anyopaque) void {
     const c: *WindowCtx = @ptrCast(@alignCast(ctx.?));
@@ -762,8 +778,9 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_KILLFOCUS => {
             if (ctx != null) {
                 // 失活：停止闪烁 + 销毁系统 caret + 停用 IME（强制完成组合）+ 取消 Edit 焦点。
-                // Tooltip（P0-1）：失焦取消显示。
+                // 弹层（P0-1）：失焦取消 Tooltip 与 ContextMenu。
                 ctx.?.tip.hide(&ctx.?.ticker);
+                ctx.?.menu.dismiss();
                 if (ctx.?.caret_timer) |h| ctx.?.ticker.clearTimer(h);
                 ctx.?.caret_timer = null;
                 _ = w32.user32.DestroyCaret();
@@ -881,6 +898,12 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const scale = ctx.?.device.?.dpi_scale;
                 if (input_mod.pointerEvent(u_msg, l_param, scale)) |ev| {
                     var e = ev;
+                    // ContextMenu 模态（P0-1）：菜单显示期间消费全部指针事件
+                    //（点击外部 = dismiss 且不作用于底层），不进树分发。
+                    if (menuFilter(ctx.?, &e)) {
+                        _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                        return 0;
+                    }
                     _ = ctx.?.tree.dispatch(&e);
                     // 事件可能改树状态（hover/active/文本等）：请求重绘（保留模式）。
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
@@ -900,6 +923,22 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                         => ctx.?.tip.press(&ctx.?.ticker),
                         else => {},
                     }
+                    // ContextMenu 触发（P0-1）：右键 down 沿命中祖先找 menu 声明 → 弹出
+                    //（容器声明对子节点生效；tip.press 已顺带抑制 tooltip）。
+                    if (u_msg == w32.windows_and_messaging.WM_RBUTTONDOWN) {
+                        const dip = clientPointDip(l_param, scale);
+                        if (node.Tree.hitTestTop(ctx.?.tree, dip)) |h| {
+                            var cur: ?*node.Node = h;
+                            while (cur) |c| {
+                                if (c.menu != null) {
+                                    ctx.?.menu.viewport = getClientSizeDips(ctx.?.device.?);
+                                    ctx.?.menu.show(c, dip);
+                                    break;
+                                }
+                                cur = c.parent;
+                            }
+                        }
+                    }
                     // tooltip 可能新挂/清除了定时器：同步惰性唤醒（§5.13）。
                     syncTickTimer(ctx.?);
                 }
@@ -912,6 +951,11 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const scale = ctx.?.device.?.dpi_scale;
                 if (input_mod.wheelEvent(hwnd, w_param, l_param, scale)) |ev| {
                     var e = ev;
+                    // ContextMenu 模态（P0-1）：菜单显示期间滚轮被消费（不滚底层）。
+                    if (menuFilter(ctx.?, &e)) {
+                        _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                        return 0;
+                    }
                     _ = ctx.?.tree.dispatch(&e);
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
                 }
@@ -927,6 +971,11 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
             if (ctx != null) {
                 if (input_mod.keyEvent(u_msg, w_param)) |ev| {
                     var e = ev;
+                    // ContextMenu 模态（P0-1）：菜单显示期间键盘被消费（Escape = dismiss）。
+                    if (menuFilter(ctx.?, &e)) {
+                        _ = w32.user32.InvalidateRect(hwnd, null, 0);
+                        return 0;
+                    }
                     _ = ctx.?.tree.dispatch(&e);
                     // 焦点变化等：请求重绘（保留模式）。
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
@@ -961,6 +1010,8 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(cp, &buf) catch return 0;
                 var ev = event.Event{ .text_input = .{ .text = buf[0..len] } };
+                // ContextMenu 模态（P0-1）：菜单显示期间文本输入被消费（不进底层 Edit）。
+                if (menuFilter(ctx.?, &ev)) return 0;
                 _ = ctx.?.tree.dispatch(&ev);
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
                 syncCaretTimer(ctx.?);
@@ -1019,7 +1070,9 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const h: u16 = @truncate(@as(u64, @bitCast(l_param)) >> 16);
                 ctx.?.device.?.resize(w, h) catch {};
                 // Tooltip（P0-1）：锚/视口几何已失效，取消显示（下次 hover 重新调度）。
+                // ContextMenu（P0-1）：同理 dismiss。
                 ctx.?.tip.hide(&ctx.?.ticker);
+                ctx.?.menu.dismiss();
                 syncTickTimer(ctx.?);
                 ctx.?.tree.root.invalidateMeasure();
                 // 触发重绘。

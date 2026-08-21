@@ -18,6 +18,7 @@ const scroll = @import("scroll.zig");
 const check = @import("check.zig");
 const slider = @import("slider.zig");
 const tooltip = @import("tooltip.zig");
+const menu = @import("menu.zig");
 const event = @import("../core/event.zig");
 
 /// 供 Tree 引用的分发表实例。
@@ -38,6 +39,7 @@ fn measureWidget(tree: *node.Tree, n: *node.Node, c: layout.Constraints) geo.Siz
         .checkbox => |d| check.measure(tree, d, c),
         .slider => |d| slider.measure(tree, d, c),
         .tooltip => |d| tooltip.measure(tree, d, c),
+        .menu => |d| menu.measure(tree, d, c),
         .scroll => .{}, // scroll 是布局容器，走 computeSize 的 else 分支，不经此路由
         .custom => unreachable, // custom 走自身 vtable，不经此路由
     };
@@ -54,6 +56,7 @@ fn paintWidget(tree: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
         .checkbox => |d| check.paint(tree, pc, n, d),
         .slider => |d| slider.paint(tree, pc, n, d),
         .tooltip => |d| tooltip.paint(tree, pc, n.rect, d),
+        .menu => |d| menu.paint(tree, pc, n.rect, d),
         .scroll => scroll.paint(tree, pc, n), // 视口固定覆盖层（滚动条拇指，§6 P0-3；paintNode 在内容后调用）
         .custom => {},
     }
@@ -70,7 +73,8 @@ fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
         .slider => slider.onEvent(tree, n, e),
         .scroll => scroll.onEvent(tree, n, e),
         // 非内建事件控件：不消费，交回 bubble（用户 handler）。穷尽列出（L8 禁 else）。
-        .none, .box, .text, .button, .tooltip, .custom => false,
+        // menu 的输入处理在 Controller.filter（模态，platform 于 dispatch 前消费）。
+        .none, .box, .text, .button, .tooltip, .menu, .custom => false,
     };
 }
 

@@ -93,3 +93,27 @@ pub fn setNodeId(tree: *node.Tree, n: *node.Node, id: []const u8) !void {
 pub fn tooltip(tree: *node.Tree, n: *node.Node, str: []const u8) !void {
     n.tip = try tree.allocStr(str);
 }
+
+/// 给节点声明右键菜单（P0-1 弹层）：右键命中本节点（或其子节点）时弹出 ContextMenu
+/// 浮层；选择项后调用 on_select(ctx, index)（UI 线程）。items 与 label 深拷贝入 arena
+/// （L5，调用方可传栈上切片）；on_select_ctx 生命周期归调用方（§5.12 trampoline 一致）。
+/// 容器声明时其子节点右键同样生效（沿祖先找声明）。
+pub fn contextMenu(
+    tree: *node.Tree,
+    n: *node.Node,
+    items: []const widget.MenuItem,
+    on_select: ?*const fn (ctx: ?*anyopaque, index: usize) void,
+    on_select_ctx: ?*anyopaque,
+) !void {
+    const decl = try tree.alloc(widget.ContextMenu);
+    const copies = try tree.arena.allocator().alloc(widget.MenuItem, items.len);
+    for (items, 0..) |it, i| {
+        copies[i] = .{
+            .label = try tree.allocStr(it.label),
+            .separator = it.separator,
+            .disabled = it.disabled,
+        };
+    }
+    decl.* = .{ .items = copies, .on_select = on_select, .on_select_ctx = on_select_ctx };
+    n.menu = decl;
+}

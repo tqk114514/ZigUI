@@ -105,6 +105,10 @@ pub const Node = struct {
     /// 悬浮提示文本（P0-1 弹层）：非空 = hover 停留 0.5s 后于锚附近显示 Tooltip 浮层。
     /// setter（builder.tooltip）拷贝入 arena（L5）；文本由 Controller 消费。
     tip: []const u8 = "",
+    /// 右键菜单声明（P0-1 弹层）：非空 = 右键命中本节点（或其子节点）时弹出
+    /// ContextMenu 浮层。builder.contextMenu 拷贝入 arena（L5）；items 与回调由
+    /// Controller 消费。声明与运行态分离：浮层节点用 Widget.menu。
+    menu: ?*widget.ContextMenu = null,
     /// 本次 measure 是否尺寸未变（传播终止用，每轮 ensureLayout 重置）。
     measured_same: bool = false,
     /// 本节点或任一后代本次 measure 是否有变化（决定是否需重排子树）。
@@ -400,7 +404,7 @@ pub const Tree = struct {
         // 叶子控件：行为经 DispatchTable 委托（§5.4）；无 dispatch 时按空处理。
         // 穷尽 switch（L8）：新增叶子控件必须在此登记，否则被当布局容器测得 0 尺寸。
         switch (n.widget) {
-            .text, .button, .edit, .checkbox, .slider, .tooltip => {
+            .text, .button, .edit, .checkbox, .slider, .tooltip, .menu => {
                 if (t.dispatch_table) |d| return c.constrain(d.measureWidget(t, n, c.loosen()));
                 return c.constrain(.{});
             },

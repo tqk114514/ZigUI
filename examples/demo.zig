@@ -45,6 +45,49 @@ fn addTipButton(t: *T, row: *ui.core.node.Node, label: []const u8, tip: []const 
     try t.appendChild(row, b);
 }
 
+/// 菜单选择结果文本（弱化小字；选择回调更新其内容）。
+fn addResultText(t: *T) !*ui.core.node.Node {
+    const n = try t.createNode(t.root);
+    n.widget = .{ .text = .{
+        .text = try t.allocStr("（尚未选择）"),
+        .font = theme.light.font_caption,
+        .color = theme.light.text_weak,
+    } };
+    try t.appendChild(t.root, n);
+    return n;
+}
+
+/// 右键菜单演示状态（P0-1）：选择回调更新结果文本。
+const MenuDemo = struct {
+    /// 结果文本节点（find 定位，选择回调里更新）。
+    var result: ?*ui.core.node.Node = null;
+
+    fn onSelect(_: ?*anyopaque, index: usize) void {
+        const n = result orelse return;
+        // 下标对齐菜单 items（分隔线占 index 2，不可达）。
+        const names = [_][]const u8{ "打开", "复制", "", "另存为…" };
+        if (index < names.len) {
+            n.widget.text.text = names[index];
+            n.invalidateMeasure();
+            n.invalidatePaint();
+        }
+    }
+};
+
+/// 带右键菜单的按钮（P0-1 弹层）：右键弹出，选择/点外部/Escape 关闭。
+fn addMenuButton(t: *T, row: *ui.core.node.Node, label: []const u8) !void {
+    const b = try t.createNode(row);
+    b.widget = .{ .button = .{ .label = try t.allocStr(label) } };
+    const items = [_]ui.core.widget.MenuItem{
+        .{ .label = "打开" },
+        .{ .label = "复制" },
+        .{ .separator = true },
+        .{ .label = "另存为…" },
+    };
+    try ui.widgets.builder.contextMenu(t, b, &items, MenuDemo.onSelect, null);
+    try t.appendChild(row, b);
+}
+
 /// 复选框（可勾选/禁用）。
 fn addCheckbox(t: *T, row: *ui.core.node.Node, label: []const u8, checked: bool, disabled: bool) !void {
     const c = try t.createNode(row);
@@ -163,6 +206,15 @@ pub fn main() anyerror!void {
         try addTipButton(&tree, row, "删除", "删除所选内容（不可撤销）");
         try addTipButton(&tree, row, "保存", "保存到当前文件");
         try addTipButton(&tree, row, "长文本", "这是一段较长的提示文本，用于验证浮层的测量与视口钳制行为");
+    }
+
+    // ContextMenu（P0-1 弹层）：右键按钮弹出菜单；选择更新下方结果文本；
+    // 点击菜单外部/Escape 关闭；显示期间输入被菜单模态消费（不作用于底层）。
+    try addLabel(&tree, "右键菜单 CONTEXT MENU");
+    {
+        const row = try addRow(&tree);
+        try addMenuButton(&tree, row, "右键我");
+        MenuDemo.result = try addResultText(&tree);
     }
 
     // 缓存层（§5.6 分层）：两个独立 node.layer 子树并排，各自离屏缓存、互不干扰

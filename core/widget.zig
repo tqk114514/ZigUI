@@ -174,6 +174,43 @@ pub const Tooltip = struct {
     pub const pad_v: f32 = 4;
 };
 
+/// 菜单项（P0-1 弹层）：label 为空且 separator=true 表示分隔线。
+pub const MenuItem = struct {
+    /// 项标签（arena）。
+    label: []const u8 = "",
+    /// 是否分隔线（不参与命中/选择）。
+    separator: bool = false,
+    /// 是否禁用（可见不可选）。
+    disabled: bool = false,
+};
+
+/// ContextMenu 控件数据（P0-1 弹层）。
+///
+/// 状态机（P0-1，驱动源 = 右键指针 / 模态过滤）：
+///   hidden → showing（右键命中带 menu 声明的节点）→ hidden
+/// - 同一 struct 用于两处：触发源节点的 `Node.menu`（声明：items + 回调）与
+///   overlay 浮层节点的 `Widget.menu`（运行态：items 拷贝 + hover）；
+/// - 显示期间 Controller.filter 模态消费输入（点击外部/Escape 关闭）；
+/// - hover 只由事件路径写（L6）；帧路径零分配（L4）。
+pub const ContextMenu = struct {
+    /// 菜单项（arena）。
+    items: []const MenuItem = &.{},
+    /// hover 项索引（事件路径写；null = 无高亮）。
+    hover: ?usize = null,
+    /// 选择回调：项被点击时调用（index = 项下标）。声明处由用户传入；
+    /// ctx 生命周期归调用方（与 §5.12 trampoline 一致），菜单销毁不释放。
+    on_select: ?*const fn (ctx: ?*anyopaque, index: usize) void = null,
+    /// 选择回调 ctx。
+    on_select_ctx: ?*anyopaque = null,
+
+    /// 内容区水平内边距（DIP）。
+    pub const pad_h: f32 = 12;
+    /// 内容区垂直内边距（DIP）。
+    pub const pad_v: f32 = 4;
+    /// 分隔线槽高（DIP，线居中）。
+    pub const sep_h: f32 = 7;
+};
+
 /// custom 变体的 vtable：用户扩展入口（§5.4）。
 pub const CustomVTable = struct {
     /// 在给定约束下返回固有尺寸。
@@ -203,6 +240,7 @@ pub const Widget = union(enum) {
     checkbox: Checkbox,
     slider: Slider,
     tooltip: Tooltip,
+    menu: ContextMenu,
     custom: Custom,
 };
 
@@ -227,7 +265,8 @@ test "widget union exhaustive switch compiles" {
         .checkbox => 6,
         .slider => 7,
         .tooltip => 8,
-        .custom => 9,
+        .menu => 9,
+        .custom => 10,
     };
     try std.testing.expect(result == 1);
     try std.testing.expect(!isNone(.box));

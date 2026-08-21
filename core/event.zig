@@ -42,6 +42,8 @@ pub const VK = struct {
     pub const CONTROL: u32 = 0x11;
     /// Alt/Menu 键。
     pub const MENU: u32 = 0x12;
+    /// Escape 键（弹层关闭，P0-1）。
+    pub const ESCAPE: u32 = 0x1B;
     /// 空格键。
     pub const SPACE: u32 = 0x20;
     /// End 键（单行编辑框 = 行尾）。
