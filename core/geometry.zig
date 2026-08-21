@@ -73,6 +73,15 @@ pub const Rect = struct {
         };
     }
 
+    /// 取同时包含 self 与 o 的外接矩形（脏区合并用，§5.4 部分重绘）。空矩形不参与。
+    pub fn merge(self: Rect, o: Rect) Rect {
+        const l = @min(self.x, o.x);
+        const t = @min(self.y, o.y);
+        const r = @max(self.x + self.w, o.x + o.w);
+        const b = @max(self.y + self.h, o.y + o.h);
+        return .{ .x = l, .y = t, .w = @max(0, r - l), .h = @max(0, b - t) };
+    }
+
     /// 是否与另一矩形相交（含边界相触视为相交）。
     pub fn intersects(self: Rect, o: Rect) bool {
         return self.x < o.x + o.w and o.x < self.x + self.w and

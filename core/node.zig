@@ -88,6 +88,8 @@ pub const Node = struct {
     measured_same: bool = false,
     /// 本节点或任一后代本次 measure 是否有变化（决定是否需重排子树）。
     desc_changed: bool = true,
+    /// 所属树（invalidatePaint 用其上报局部脏区 rect；build 期由 ensureLayout 扫描设置）。
+    tree: ?*Tree = null,
 
     pub fn invalidateMeasure(n: *Node) void {
         var cur: ?*Node = n;
@@ -97,12 +99,20 @@ pub const Node = struct {
         }
     }
 
+    /// 标脏自身绘制并失效所在 scroll 的离屏表面（§5.4/§5.6）。并入树脏区（cliped 区域内由
+    /// paintPath 的 clipIntersects 连带重绘覆盖区域）；同时向上找最近 scroll 祖先通知宿主，
+    /// 使内容变化触发离屏表面重栅化。
     pub fn invalidatePaint(n: *Node) void {
-        var cur: ?*Node = n;
-        while (cur) |c| {
-            c.dirty_paint = true;
-            cur = c.parent;
-        }
+        n.dirty_paint = true;
+        if (n.tree) |t| t.markDirtyRect(n.rect);
+        notifyScrollSurface(n);
+    }
+
+    /// 仅标脏自身绘制并并入树脏区，不失效任何 scroll 离屏表面（§5.6）。
+    /// 供 scroll 偏移变更调用：滚动只平移不改内容，表面位图仍有效，无需重栅化（复用前提）。
+    pub fn invalidatePaintOnly(n: *Node) void {
+        n.dirty_paint = true;
+        if (n.tree) |t| t.markDirtyRect(n.rect);
     }
 
     /// 标脏布局（§6）：滚动偏移等仅改显示的变更沿祖先链置位，强制下一轮 arrange
@@ -149,6 +159,22 @@ pub const DispatchTable = struct {
     onEvent: *const fn (tree: *Tree, n: *Node, e: *const event.Event) bool,
 };
 
+/// 滚动容器离屏表面宿主（§5.6 光栅缓存）：render 层实现，core 只持接口（L1，core 不触渲染）。
+/// paintNode 遇到 scroll 节点且有宿主时，把子树绘制委托给宿主（离屏栅格化 + DrawSurface 平移复用）。
+pub const ScrollSurfaceHost = struct {
+    /// 实现 vtable。
+    vtable: *const VTable,
+    /// 实现实例（render 的 Device 等）。
+    impl: *anyopaque,
+    pub const VTable = struct {
+        /// 用（或重栅化）离屏缓存绘制 scroll 节点 n 的子内容，并把缓存位图绘制到主场景 pc。
+        /// 返回 true = 已处理，paintNode 应跳过默认的子递归。
+        paintScroll: *const fn (impl: *anyopaque, tree: *Tree, n: *Node, pc: painter.PaintCtx) bool,
+        /// 通知宿主：n（scroll）内容/几何已变化，其离屏缓存已失效，下次绘制须重栅化。
+        invalidate: *const fn (impl: *anyopaque, n: *Node) void,
+    };
+};
+
 /// 树（§5.3）：arena 拥有全部节点；单值指针 focus/hover/active；提供布局与事件分发。
 pub const Tree = struct {
     /// 整树内存的所有者（§4.3：deinit 整树丢弃）。
@@ -169,6 +195,8 @@ pub const Tree = struct {
     theme_ref: *const theme.Theme,
     /// 文本系统（§5.7）：text 控件 measure 消费 bounds。默认 null（无文本能力）。
     text_system: ?painter.TextSystem = null,
+    /// 滚动容器离屏表面宿主（§5.6 光栅缓存）：render 安装实现；null = 走默认子递归绘制。
+    scroll_surface: ?ScrollSurfaceHost = null,
     /// 剪贴板接口（§5.11）：platform 装配实现，Edit 复制/粘贴经此（widgets 不碰平台）。
     clipboard: ?Clipboard = null,
     /// 控件行为分发表（§5.4）。默认 null（无内建控件行为）。
@@ -179,6 +207,10 @@ pub const Tree = struct {
     content_top: f32 = 0,
     /// 观测用：arrange 实际重排子树的次数（测试断言传播终止）。
     relayout_count: usize = 0,
+    /// 局部脏区（DIP，客户区坐标系，§5.4 部分重绘）：invalidatePaint 并入，renderFrame
+    /// 消费后置 null。null + 无布局松动 = 整窗重绘。只含"纯绘制状态变化"的叶子矩形；
+    /// measure/layout 松动在 beginPaintDirty 判定为整窗。
+    dirty_rect: ?geo.Rect = null,
 
     pub fn init(allocator: std.mem.Allocator, th: *const theme.Theme) !Tree {
         var tree = Tree{
@@ -196,8 +228,43 @@ pub const Tree = struct {
         paintNode(t, pc, t.root);
     }
 
+    /// 供离屏表面宿主调用：以自定义裁剪区绘制 node 的子节点（滚动条带栅格化，§5.6）。
+    /// 子节点 rect 与 clip 均为 node 的本地（父）坐标系；D2D 经 surface 变换折换到条带。
+    pub fn paintChildrenInto(t: *Tree, pc: painter.PaintCtx, n: *Node, clip: geo.Rect) void {
+        pc.pushClip(clip);
+        for (n.children) |c| paintNode(t, pc, c);
+        pc.popClip();
+    }
+
     pub fn deinit(t: *Tree) void {
         t.arena.deinit();
+    }
+
+    /// 并入一个需重绘的矩形（DIP，客户区坐标）到局部脏区（§5.4）。只并入非空矩形。
+    pub fn markDirtyRect(t: *Tree, r: geo.Rect) void {
+        if (r.w <= 0 or r.h <= 0) return;
+        t.dirty_rect = if (t.dirty_rect) |cur| cur.merge(r) else r;
+    }
+
+    /// 消费本帧待重绘区域并清空脏区（渲染前调用）。
+    /// 返回本次要重绘的 DIP 矩形：有布局/测量松动（沿链到 root）→ 整窗 viewport；
+    /// 否则 → 局部脏区（可能 null = 无新增变化）。
+    pub fn beginPaintDirty(t: *Tree, viewport: geo.Rect) ?geo.Rect {
+        const d = t.dirty_rect;
+        t.dirty_rect = null;
+        if (t.root.dirty_measure or t.root.layout_dirty) return viewport;
+        return d;
+    }
+
+    /// 回填 node.tree 反向指针（invalidatePaint 上报脏区用）。建树完成后首轮生效；
+    /// 起见后续 O(1)：已设过则整子树跳过。
+    fn syncNodeTree(t: *Tree) void {
+        syncNodeChildren(t.root, t);
+    }
+    fn syncNodeChildren(n: *Node, t: *Tree) void {
+        if (n.tree == t) return;
+        n.tree = t;
+        for (n.children) |c| syncNodeChildren(c, t);
     }
 
     /// 暴露 arena 分配器（§4.3）：所有 setter 必须拷贝入 arena。
@@ -213,14 +280,17 @@ pub const Tree = struct {
     /// 新建节点并挂到某父节点下（arena 语义；返回由调用方初始化 widget/layout/id 等）。
     pub fn createNode(t: *Tree, parent: *Node) !*Node {
         const n = try t.alloc(Node);
-        n.* = .{ .parent = parent };
+        n.* = .{ .parent = parent, .tree = parent.tree };
         return n;
     }
 
     /// 列表变更的唯一合法方式：重建语义（§4.3/§5.3）。
     pub fn replaceChildren(t: *Tree, node: *Node, children: []const *Node) !void {
         node.children = try t.arena.allocator().dupe(*Node, children);
-        for (node.children) |c| c.parent = node;
+        for (node.children) |c| {
+            c.parent = node;
+            if (c.tree == null) c.tree = node.tree;
+        }
         node.invalidateMeasure();
         node.invalidatePaint();
     }
@@ -233,6 +303,7 @@ pub const Tree = struct {
         new_children[n - 1] = child;
         node.children = new_children;
         child.parent = node;
+        if (child.tree == null) child.tree = node.tree;
         node.invalidateMeasure();
         node.invalidatePaint();
     }
@@ -240,6 +311,7 @@ pub const Tree = struct {
     /// 惰性布局：绘制前或任何读 rect 前必须调用（§5.3）。稳态零分配。
     /// root 从 content_top（§5.9 自定义标题栏）开始排布，尺寸 = 窗口减顶部偏移。
     pub fn ensureLayout(t: *Tree, window_size: geo.Size) void {
+        t.syncNodeTree(); // 首次：回填 node.tree 反向指针（部分重绘上报脏区用）。
         const root_c = layout.Constraints{
             .min = window_size,
             .max = window_size,
@@ -637,6 +709,26 @@ fn rectEq(a: geo.Rect, b: geo.Rect) bool {
         geo.approxEq(a.w, b.w) and geo.approxEq(a.h, b.h);
 }
 
+/// 颜色精确相等（theme token 为精确 f32 常量，测试断言用，避免浮点近似误差）。
+fn colorEq(a: theme.Color, b: theme.Color) bool {
+    return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
+}
+
+/// 失效 n 所在 scroll 的离屏表面（文件级辅助，§5.6）。从 n 向上找最近 scroll 祖先，
+/// 命中且有宿主则通知 invalidate（重栅化）。无宿主或无 scroll 祖先则 no-op。
+fn notifyScrollSurface(n: *Node) void {
+    const t = n.tree orelse return;
+    const ss = t.scroll_surface orelse return;
+    var cur: ?*Node = n;
+    while (cur) |c| {
+        if (c.widget == .scroll) {
+            ss.vtable.invalidate(ss.impl, c);
+            return;
+        }
+        cur = c.parent;
+    }
+}
+
 /// paintTree 顺序（§5.4）：可见性 → 裁剪剔除 → Node 层背景/边框 → 控件内容 →
 /// 内容区 pushClip → 递归子节点 → popClip。paint 不写树状态（L6）。
 fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
@@ -648,6 +740,13 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
     if (n.style.border_color) |bc| {
         if (n.style.border_width > 0) {
             pc.strokeRect(n.rect, bc, n.style.border_width, t.theme_ref.radius.small);
+        }
+    }
+
+    // 滚动容器：有离屏表面宿主则交由宿主绘制（光栅缓存，§5.6）；宿主处理成功则跳过默认子递归。
+    if (n.widget == .scroll) {
+        if (t.scroll_surface) |ss| {
+            if (ss.vtable.paintScroll(ss.impl, t, n, pc)) return;
         }
     }
 
@@ -922,6 +1021,57 @@ test "find by id" {
     try std.testing.expect(Tree.findIn(t.root, "a").? == n1);
     try std.testing.expect(Tree.findIn(t.root, "b").? == n2);
     try std.testing.expect(Tree.findIn(t.root, "zzz") == null);
+}
+
+test "partial repaint: dirty rect fully covered by innermost bg, no grout (§5.4)" {
+    // 场景：带白底(bg_surface)的容器 panel，内含一个透明叠加子节点（如文字/hover 目标）。
+    // 子节点变化 → 局部脏区 = 子节点 rect（小数坐标）。窗口部分重绘 = 先 Clear 脏区成窗色(灰)
+    // （严格是 renderFrame 的 Clear(bg_window) + PushClip(dirty)），再 clip 内全量 paint。
+    // 关键不变量：脏区必须被其最内层不透明 bg（panel 白）完整覆盖并上色，而非残留窗色灰——
+    // 否则子节点背景从容器白漏成窗口灰（视觉 1px 缝）。clip 内全量重画借 clipIntersects 覆盖到容器。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+    t.root.layout = .{ .none = {} };
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+
+    const panel = try t.createNode(t.root);
+    panel.style.bg = theme.light.bg_surface; // 白底容器。
+    panel.rect = .{ .x = 0, .y = 0, .w = 120, .h = 60 };
+    try t.appendChild(t.root, panel);
+
+    // 容器内透明子节点（无 bg，叠加在 panel 白上）；dirty = 其 rect（小数，模拟布局小数坐标）。
+    const child = try t.createNode(panel);
+    child.rect = .{ .x = 6, .y = 3.39, .w = 40.0, .h = 21.51 };
+    try t.appendChild(panel, child);
+    t.root.rect = .{ .w = 120, .h = 60 };
+
+    const dirty = child.rect;
+    // 模拟 renderFrame 局部重绘：有效裁剪 = 脏区 → 只画与脏区相交的节点（含容器 panel）。
+    mp.clip_rect = dirty;
+    mp.ctx.pushClip(dirty);
+    mp.ctx.fillRect(dirty, theme.light.bg_window); // Clear(dirty) → 脏区铺窗色（灰）。
+    t.paint(mp.ctx);
+    mp.ctx.popClip();
+
+    // 断言：最后一个完整覆盖肮区且颜色≠窗色的 fillRect 存在（灰被 panel 白盖住，无灰缝）。
+    var last_cover_bg: ?theme.Color = null;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect) {
+            const fr = c.fillRect;
+            const covers = fr.rect.x <= dirty.x and fr.rect.y <= dirty.y and
+                fr.rect.x + fr.rect.w >= dirty.x + dirty.w and
+                fr.rect.y + fr.rect.h >= dirty.y + dirty.h;
+            if (covers) last_cover_bg = fr.color;
+        }
+    }
+    const fg = last_cover_bg orelse return error.ExpectFalse;
+    // 灰（窗色）被容器白 bg_surface 覆盖：最终上色必须既非窗色、又恰为 panel 的白底。
+    try std.testing.expect(!colorEq(fg, theme.light.bg_window));
+    try std.testing.expect(colorEq(fg, theme.light.bg_surface));
 }
 
 test "paint culls children outside clip viewport (Scroll 剔除前提，§5.4)" {

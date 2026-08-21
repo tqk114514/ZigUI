@@ -24,7 +24,7 @@ const wheel_step: f32 = 24;
 const auto_scroll_step: f32 = 16;
 
 /// 滚动到指定偏移（钳制到 [0, content_h − 视口高]）。偏移不变则什么都不做。
-/// 偏移变更走 invalidateLayout 强制 arrange 重排 + invalidatePaint 重绘。
+/// 偏移变更走 invalidateLayout 强制 arrange 重排 + invalidatePaintOnly 重绘（不失效离屏表面，§5.6）。
 pub fn setOffset(n: *node.Node, y: f32) void {
     const d = &n.widget.scroll;
     const max_off = maxOffset(n);
@@ -32,7 +32,8 @@ pub fn setOffset(n: *node.Node, y: f32) void {
     if (geo.approxEq(clamped, d.offset_y)) return;
     d.offset_y = clamped;
     n.invalidateLayout();
-    n.invalidatePaint();
+    // 滚动平移：仅标脏重绘，不失效离屏表面（§5.6 复用前提——内容未变，只平移 DrawSurface）。
+    n.invalidatePaintOnly();
 }
 
 /// 增量滚动（滚轮/拖选越界）：正 = 内容下移（看向更后）。

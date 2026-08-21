@@ -102,6 +102,8 @@ const WindowCtx = struct {
     tb_pressed: i8 = BTN_NONE,
     /// 最大化后首帧需要按最大化处理裁剪/布局（maximize 尺寸与 restore 不同）。
     maximize_dirty: bool = false,
+    /// 标题栏需局部重绘（§5.4）：按钮 hover/press 变化时置位，renderFrame 把整条 strip 并入脏区。
+    tb_dirty: bool = false,
 };
 
 /// 光标闪烁定时器 ID（§5.8：WM_TIMER 530ms，仅 focus 时启动）。
@@ -183,6 +185,8 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
     const device = try device_mod.Device.init(std.heap.page_allocator, hwnd);
     defer device.deinit();
     tree.text_system = text_mod.asTextSystem(&device.text_system);
+    // 装配滚动容器离屏表面宿主（§5.6 光栅缓存）：滚动内容缓存到离屏位图，滚动平移复用像素。
+    tree.scroll_surface = painter_mod.asScrollHost(device);
 
     // 5b. 创建跨线程任务桥（§5.12），绑定 hwnd。
     const bridge = try std.heap.page_allocator.create(post_mod.PostBridge);
@@ -416,7 +420,9 @@ fn showSystemMenu(ctx: *WindowCtx, sx: i16, sy: i16) void {
     }
 }
 
-/// 执行一帧绘制（WM_PAINT 与首帧共用）。
+/// 执行一帧绘制（WM_PAINT 与首帧共用）。部分重绘（§5.4）：本帧脏区 = 树局部脏区 ∪
+/// 标题栏 strip（tb_dirty）∪ 布局松动时的整窗；用 PushClip 把 Clear 与绘制限制在脏区，
+/// 脏区外复用上一帧像素。
 fn renderFrame(ctx: *WindowCtx) void {
     const dev = ctx.device.?;
     // 确保 render target 就绪（窗口显示后首次绘制才真正创建）。
@@ -427,16 +433,28 @@ fn renderFrame(ctx: *WindowCtx) void {
     ctx.tree.content_top = if (ctx.titlebar_active) TITLEBAR_H else 0;
     ctx.tree.ensureLayout(client);
 
+    // 本帧脏区（DIP，客户区坐标）：树局部脏区；无局部脏则整窗。
+    const full = geometry.Rect{ .x = 0, .y = 0, .w = client.width, .h = client.height };
+    var dirty = ctx.tree.beginPaintDirty(full) orelse full;
+    if (ctx.tb_dirty) {
+        ctx.tb_dirty = false;
+        const strip = geometry.Rect{ .x = 0, .y = 0, .w = client.width, .h = TITLEBAR_H };
+        dirty = dirty.merge(strip);
+    }
+
     const pc = ctx.painter.ctx(ctx.theme_ref);
     dev.beginFrame();
-    // 清背景（窗口 token）。
+    // 脏区裁剪：Clear 与全部绘制都受此 clip 限制，脏区外保留上帧像素（部分重绘）。
+    pc.pushClip(dirty);
+    // 清背景（窗口 token；受 clip 限制，只清脏区）。
     dev.rt.?.ID2D1RenderTarget.Clear(&toD2DColor(ctx.theme_ref.bg_window));
-    // 标题栏（§5.9）：先于内容绘制，一体视觉。
+    // 标题栏（§5.9）：先于内容绘制，一体视觉（被 clip 裁到脏区）。
     if (ctx.titlebar_active) paintTitlebar(ctx, pc);
     ctx.tree.paint(pc);
+    pc.popClip();
     const need_retry = dev.endFrame();
     if (need_retry) {
-        // 设备丢失：endFrame 已重建 render target，重绘一次。
+        // 设备丢失：endFrame 已重建 render target，重绘一次（全量，旧 clip 已归零）。
         dev.beginFrame();
         dev.rt.?.ID2D1RenderTarget.Clear(&toD2DColor(ctx.theme_ref.bg_window));
         if (ctx.titlebar_active) paintTitlebar(ctx, pc);
@@ -643,6 +661,7 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const new_hover: i8 = if (w_param == w32.windows_and_messaging.HTMAXBUTTON) BTN_MAX else BTN_NONE;
                 if (new_hover != ctx.?.tb_hover) {
                     ctx.?.tb_hover = new_hover;
+                    ctx.?.tb_dirty = true;
                     _ = w32.user32.InvalidateRect(hwnd, null, 0);
                 }
             }
@@ -651,6 +670,7 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_NCLBUTTONDOWN => {
             if (ctx != null and ctx.?.titlebar_active and w_param == w32.windows_and_messaging.HTMAXBUTTON) {
                 ctx.?.tb_pressed = BTN_MAX;
+                ctx.?.tb_dirty = true;
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
                 return 0; // 不交系统：避免 Snap 预览捕获鼠标吞掉抬起事件
             }
@@ -659,6 +679,7 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_NCLBUTTONUP => {
             if (ctx != null and ctx.?.titlebar_active and ctx.?.tb_pressed == BTN_MAX) {
                 ctx.?.tb_pressed = BTN_NONE;
+                ctx.?.tb_dirty = true;
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
                 // 自定义标题栏移除标准栏后系统不执行 HTMAXBUTTON 点击，需手动最大化/恢复。
                 titlebarAction(ctx.?, BTN_MAX);
@@ -904,6 +925,8 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_TIMER => {
             if (ctx != null and w_param == TIMER_CARET) {
                 ctx.?.tree.caret_blink_on = !ctx.?.tree.caret_blink_on;
+                // 只重绘焦点 Edit 的局部脏区（§5.4）：其余像素复用。
+                if (ctx.?.tree.focus) |f| ctx.?.tree.markDirtyRect(f.rect);
                 _ = w32.user32.InvalidateRect(hwnd, null, 0);
             }
             return 0;

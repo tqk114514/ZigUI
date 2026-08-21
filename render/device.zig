@@ -20,6 +20,29 @@ const text = @import("text.zig");
 
 const log = std.log.scoped(.render);
 
+/// 离屏光栅表面（§5.6 光栅缓存）：独立 DC + TARGET 位图，滚动容器内容条带缓存，
+/// 滚动时 DrawSurface 平移复用像素，越出条带才重栅化。
+pub const RenderSurface = struct {
+    /// 离屏 DC（从同 d2d_device 另建，独立于主 rt；避免与主 target 争用）。
+    dc: ?*d2d.ID2D1DeviceContext = null,
+    /// 离屏 TARGET 位图（CreateBitmap 建，非交换链表面）。物理像素尺寸。
+    bitmap: ?*d2d.ID2D1Bitmap1 = null,
+    /// 位图物理像素宽高。
+    px_w: u32 = 0,
+    px_h: u32 = 0,
+    /// 是否正被本帧占用（栅格化中；用完即解绑 target）。
+    in_use: bool = false,
+
+    // —— 复用判定元数据（§5.6）：条带（strip）参数（DIP，内容坐标）——
+    /// 上次栅格化关联的 scroll 节点（地址标识，换节点强制重栅化；不代入核心类型避免依赖）。
+    node_id: usize = 0,
+    /// 上次栅格化的 scroll 视口（DIP，内区尺寸）。
+    view_w: f32 = 0,
+    view_h: f32 = 0,
+    /// 上次栅格化时的 scroll 内容偏移（DIP）：此刻条带中心对齐视口。
+    anchor_off: f32 = 0,
+};
+
 /// 渲染设备：持有 D3D11/D2D 设备与翻转交换链，负责创建/重设/设备丢失恢复。
 pub const Device = struct {
     /// 分配器（init 传入，页面级）。
@@ -44,6 +67,14 @@ pub const Device = struct {
     rt: ?*d2d.ID2D1DeviceContext = null,
     /// 交换链后缓冲绑定的 D2D target bitmap。
     target_bitmap: ?*d2d.ID2D1Bitmap1 = null,
+    /// 持久帧缓冲（§5.6 部分重绘的基石）：内容每帧画到这块跨帧不变的 CUSTOM bitmap，
+    /// 帧末整体 blit 到交换链后缓冲。翻转双缓冲下后缓冲轮流使用，若直接局部重绘画后缓冲，
+    /// 非脏区会依赖"上帧另一 buffer 的陈旧/垃圾像素"→ 移入闪烁与滚动撕裂；持久帧缓冲
+    /// 保证非脏区来自本帧同一 bitmap，全局一致。
+    frame_bitmap: ?*d2d.ID2D1Bitmap1 = null,
+    /// 帧缓冲物理像素宽高（尺寸不符时重建）。
+    frame_w: u32 = 0,
+    frame_h: u32 = 0,
     /// 当前 DIP 缩放（1.0 = 96 DPI）。WM_DPICHANGED 时更新。
     dpi_scale: f32 = 1.0,
     /// 内容区物理像素尺寸；WM_SIZE/ensureTarget 时更新。
@@ -55,6 +86,12 @@ pub const Device = struct {
     text_system: text.TextSystemImpl,
     /// 折线绘制用 path geometry（strokePolyline 复用，惰性创建；§5.6 禁止每帧建对象）。
     path_geometry: ?*d2d.ID2D1PathGeometry = null,
+    /// 离屏光栅表面（§5.6）：滚动容器内容缓存的单例可复用表面。
+    surface: RenderSurface = .{},
+    /// 离屏绘制专用 brush 缓存：brush 绑离屏 target，与主 rt 隔离（D2DERR_WRONG_TARGET 前提，§5.6）。
+    surface_brush: cache.BrushCache,
+    /// 表面内容是否已脏：内容/几何变化或首次置脏，下帧重栅化；滚动偏移变化不置脏（复用前提）。
+    surface_dirty: bool = true,
 
     /// 创建设备。失败返回错误（可失败边界，§4.2）。
     pub fn init(allocator: std.mem.Allocator, hwnd: win32.HWND) !*Device {
@@ -78,6 +115,7 @@ pub const Device = struct {
             .dwrite_factory = dwrite_factory,
             .hwnd = hwnd,
             .brush_cache = cache.BrushCache.init(allocator),
+            .surface_brush = cache.BrushCache.init(allocator),
             .text_system = text.TextSystemImpl.init(allocator, dwrite_factory),
         };
         // GPU 管线（D3D11 设备 + DXGI 工厂 + D2D 设备；交换链惰性创建）失败时清理已建的 COM 对象。
@@ -319,10 +357,99 @@ pub const Device = struct {
         if (self.swap_chain) |s| _ = s.IUnknown.Release();
         self.target_bitmap = null;
         self.swap_chain = null;
+        self.releaseFrameTarget();
+    }
+
+    /// 释放持久帧缓冲与相关尺寸记录（尺寸变化/设备重建/废弃时）。
+    fn releaseFrameTarget(self: *Device) void {
+        if (self.frame_bitmap) |b| _ = b.IUnknown.Release();
+        self.frame_bitmap = null;
+        self.frame_w = 0;
+        self.frame_h = 0;
+    }
+
+    /// 确保持久帧缓冲存在且尺寸与客户区一致（首帧/尺寸变化/设备重建后）。失败静默
+    /// （OOM）：beginFrame 回落直接画后缓冲（全窗，性能退化但行为正确）。
+    fn ensureFrameTarget(self: *Device) void {
+        const dc = self.rt orelse return;
+        if (self.px_width == 0 or self.px_height == 0) return;
+        if (self.frame_bitmap != null and self.frame_w == self.px_width and self.frame_h == self.px_height) return;
+        self.releaseFrameTarget();
+        const props = d2d.D2D1_BITMAP_PROPERTIES1{
+            .pixelFormat = .{
+                .format = .B8G8R8A8_UNORM,
+                .alphaMode = d2d.common.D2D1_ALPHA_MODE.IGNORE,
+            },
+            .dpiX = 96.0,
+            .dpiY = 96.0,
+            // 仅 TARGET、不带 CANNOT_DRAW：帧缓冲既作内容 target 又在帧末作为 blit 的 source。
+            // CANNOT_DRAW 会阻止 DrawBitmap 以它为源（0x88990021）。
+            .bitmapOptions = .{ .TARGET = 1 },
+            .colorContext = null,
+        };
+        var b: *d2d.ID2D1Bitmap1 = undefined;
+        const size = d2d.common.D2D_SIZE_U{ .width = self.px_width, .height = self.px_height };
+        if (dc.CreateBitmap(size, null, 0, &props, &b).failed) return;
+        self.frame_bitmap = b;
+        self.frame_w = self.px_width;
+        self.frame_h = self.px_height;
+    }
+
+    /// 释放离屏表面（DC + 位图 + 表面 brush），设备丢失重建/废弃时调用。
+    fn releaseSurface(self: *Device) void {
+        self.surface_dirty = true;
+        if (self.surface.in_use) {
+            if (self.surface.dc) |d| d.SetTarget(null); // 先解绑 target 再释放（§5.6 翻转丢弃前提）。
+            self.surface.in_use = false;
+        }
+        if (self.surface.bitmap) |b| _ = b.IUnknown.Release();
+        if (self.surface.dc) |d| _ = d.IUnknown.Release();
+        self.surface = .{};
+        self.surface_brush.reset();
+    }
+
+    /// 准备离屏表面到 ≥ 指定物理像素尺寸（首帧/尺寸不足时建 DC 与位图并绑定 target）。
+    /// 调用方随后负责 SetDpi/SetTransform/BeginDraw/画内容/EndDraw，并 SetTarget(null) 归还。
+    pub fn beginSurface(self: *Device, px_w: u32, px_h: u32) !void {
+        if (px_w == 0 or px_h == 0) return error.EmptySurface;
+        const dpi = 96.0 * self.dpi_scale;
+        if (self.surface.dc == null) {
+            // 从同 d2d_device 另建独立 DC：避免与主 rt 争用 target（§5.6 光栅缓存）。
+            var dc: *d2d.ID2D1DeviceContext = undefined;
+            if (self.d2d_device.?.CreateDeviceContext(d2d.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc).failed) {
+                return error.SurfaceDcFailed;
+            }
+            self.surface.dc = dc;
+        }
+        // 尺寸不足 → 重建更大位图（条带变化；view/node 变化由 paintScroll 判定重栅化）。
+        if (self.surface.bitmap == null or px_w > self.surface.px_w or px_h > self.surface.px_h) {
+            if (self.surface.bitmap) |b| _ = b.IUnknown.Release();
+            const props = d2d.D2D1_BITMAP_PROPERTIES1{
+                .pixelFormat = .{
+                    .format = .B8G8R8A8_UNORM,
+                    .alphaMode = d2d.common.D2D1_ALPHA_MODE.PREMULTIPLIED,
+                },
+                .dpiX = dpi,
+                .dpiY = dpi,
+                .bitmapOptions = .{ .TARGET = 1, .CANNOT_DRAW = 0 },
+                .colorContext = null,
+            };
+            var bmp: *d2d.ID2D1Bitmap1 = undefined;
+            if (self.surface.dc.?.CreateBitmap(.{ .width = px_w, .height = px_h }, null, 0, &props, &bmp).failed) {
+                return error.SurfaceBitmapFailed;
+            }
+            self.surface.bitmap = bmp;
+            self.surface.px_w = px_w;
+            self.surface.px_h = px_h;
+        }
+        self.surface.in_use = true;
+        // 绑定离屏位图为绘制目标（与主交换链 target 相互独立，§5.6）。
+        self.surface.dc.?.SetTarget(&self.surface.bitmap.?.ID2D1Image);
     }
 
     /// 释放 GPU 管线对象与 brush 缓存（设备丢失/重建共用；text 系统保留）。
     fn releaseGpu(self: *Device) void {
+        self.releaseSurface();
         self.releaseSwapChain();
         if (self.rt) |rt| _ = rt.IUnknown.Release();
         if (self.d2d_device) |d| _ = d.IUnknown.Release();
@@ -346,17 +473,23 @@ pub const Device = struct {
         self.dpi_scale = scale;
     }
 
-    /// 帧开始：绑定 target + 设 DPI + BeginDraw。调用方须先 ensureTarget。
+    /// 帧开始：绑定持久帧缓冲为绘制目标 + 设 DPI + BeginDraw（§5.6）。调用方须先 ensureTarget。
+    /// 内容画到 frame_bitmap（跨帧一致），帧末由 endFrame 整体 blit 到交换链后缓冲。
     pub fn beginFrame(self: *Device) void {
         const dc = self.rt.?;
-        // 绑定交换链后缓冲为绘制目标（§5.6：每帧设一次，此后全程逻辑坐标）。
-        dc.SetTarget(&self.target_bitmap.?.ID2D1Image);
+        self.ensureFrameTarget();
+        const target: *d2d.ID2D1Image = if (self.frame_bitmap) |fb|
+            &fb.ID2D1Image
+        else
+            &self.target_bitmap.?.ID2D1Image; // frame 缺失（OOM）回退直接画后缓冲（全窗）。
+        dc.SetTarget(target);
         const dpi = 96.0 * self.dpi_scale;
         dc.ID2D1RenderTarget.SetDpi(dpi, dpi);
         dc.ID2D1RenderTarget.BeginDraw();
     }
 
-    /// 帧结束：EndDraw + Present(1)。返回 true 表示设备丢失已重建、需要重绘一次。
+    /// 帧结束：EndDraw（内容帧）→ 整体 blit frame→后缓冲 → Present(1)。
+    /// 返回 true 表示设备丢失已重建、需要重绘一次。
     pub fn endFrame(self: *Device) bool {
         const dc = self.rt.?;
         const hr = dc.ID2D1RenderTarget.EndDraw(null, null);
@@ -367,6 +500,35 @@ pub const Device = struct {
                 return false;
             };
             return true;
+        }
+        // frame → 交换链后缓冲整体 blit：非脏区来自持久帧缓冲，翻转双缓冲下也全局一致。
+        if (self.frame_bitmap) |fb| {
+            const dpi = 96.0 * self.dpi_scale;
+            const dest = d2d.common.D2D_RECT_F{
+                .left = 0,
+                .top = 0,
+                .right = @as(f32, @floatFromInt(self.px_width)) / self.dpi_scale,
+                .bottom = @as(f32, @floatFromInt(self.px_height)) / self.dpi_scale,
+            };
+            const src = d2d.common.D2D_RECT_F{
+                .left = 0,
+                .top = 0,
+                .right = @floatFromInt(self.px_width),
+                .bottom = @floatFromInt(self.px_height),
+            };
+            dc.SetTarget(&self.target_bitmap.?.ID2D1Image);
+            dc.ID2D1RenderTarget.SetDpi(dpi, dpi);
+            dc.ID2D1RenderTarget.BeginDraw();
+            dc.ID2D1RenderTarget.DrawBitmap(&fb.ID2D1Bitmap, &dest, 1.0, .LINEAR, &src);
+            const hr2 = dc.ID2D1RenderTarget.EndDraw(null, null);
+            if (hr2.failed) {
+                log.debug("blit EndDraw failed (0x{x}), rebuilding device", .{@as(u32, @bitCast(hr2))});
+                self.rebuildGpu() catch {
+                    log.err("device rebuild failed", .{});
+                    return false;
+                };
+                return true;
+            }
         }
         // Present(1)：对齐下一 v-sync（§5.6 高刷标准做法，避免撕裂并帧对齐刷新）。
         const pr = self.swap_chain.?.IDXGISwapChain.Present(1, 0);
@@ -390,9 +552,10 @@ pub const Device = struct {
 
     /// 释放设备与全部缓存（GPU 管线 / render target / brush / 工厂）。
     pub fn deinit(self: *Device) void {
-        // releaseGpu 释放 GPU 管线、brush 与 path geometry（保留 text 系统/dwrite 工厂）。
+        // releaseGpu 释放 GPU 管线、surface、brush 与 path geometry（保留 text 系统/dwrite 工厂）。
         self.releaseGpu();
         self.brush_cache.deinit();
+        self.surface_brush.deinit();
         _ = self.dwrite_factory.IUnknown.Release();
         const a = self.allocator;
         a.destroy(self);

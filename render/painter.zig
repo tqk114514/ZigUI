@@ -9,25 +9,46 @@
 const std = @import("std");
 const win32 = @import("../platform/win32.zig");
 const d2d = win32.direct2d;
+const cache = @import("cache.zig");
 const geometry = @import("../core/geometry.zig");
 const painter = @import("../core/painter.zig");
+const node = @import("../core/node.zig");
 const theme = @import("../theme.zig");
 const device_mod = @import("device.zig");
 const text_mod = @import("text.zig");
 
 /// 折线最大点数（帧路径栈上缓冲上限，L4 零分配）。
 const MAX_POLY_PTS: usize = 32;
+/// 滚动条带缓冲倍数（§5.6 光栅缓存）：surface 高 = 视口高 × 本倍数，视口居条带中央，
+/// 上下各留缓冲，滚动越出条带才重栅化。
+const SURFACE_MULT: f32 = 3.0;
 
 /// D2D 实现的 PaintCtx：持 device 引用，vtable 固定。
 pub const D2DPainter = struct {
     /// 渲染设备引用（持有 target 与缓存）。
     device: *device_mod.Device,
+    /// 是否绘制到离屏表面（§5.6）：true 时绘制目标设备是 device.surface.dc，brush 用
+    /// surface_brush（与主 rt 隔离，防 D2DERR_WRONG_TARGET）。
+    surf: bool = false,
 
     /// 裁剪栈（DIP）：pushClip/popClip 同步维护，clipIntersects 据此剔除（§5.4
     /// ScrollView 性能的前提）。有效裁剪区 = 栈内所有 clip 的交集；每帧 paint
     /// push/pop 成对出现，帧末深度归零。
     clip_stack: [128]geometry.Rect = undefined,
     clip_depth: usize = 0,
+
+    /// 当前绘制 target（主 rt 或离屏表面 dc），以 ID2D1RenderTarget 视之（COM 继承基址同址）。
+    fn rt(self: *D2DPainter) *d2d.ID2D1RenderTarget {
+        return if (self.surf)
+            &self.device.surface.dc.?.ID2D1RenderTarget
+        else
+            &self.device.rt.?.ID2D1RenderTarget;
+    }
+
+    /// 当前 brush 缓存（主 或 离屏 独立缓存；目标必须匹配，§5.6）。
+    fn brushBank(self: *D2DPainter) *cache.BrushCache {
+        return if (self.surf) &self.device.surface_brush else &self.device.brush_cache;
+    }
 
     var vtable: painter.PaintCtx.VTable = .{
         .fillRect = implFillRect,
@@ -59,7 +80,7 @@ pub const D2DPainter = struct {
         const r = snapRectToPixels(rect, self.device.dpi_scale);
         const d2d_rect = toD2DRect(r);
         if (brushFor(self, color)) |b| {
-            self.device.rt.?.ID2D1RenderTarget.FillRectangle(&d2d_rect, brushCast(b));
+            self.rt().FillRectangle(&d2d_rect, brushCast(b));
         }
     }
 
@@ -79,14 +100,14 @@ pub const D2DPainter = struct {
                     .radiusX = radius,
                     .radiusY = radius,
                 };
-                self.device.rt.?.ID2D1RenderTarget.DrawRoundedRectangle(
+                self.rt().DrawRoundedRectangle(
                     &rr,
                     brushCast(b),
                     width,
                     null,
                 );
             } else {
-                self.device.rt.?.ID2D1RenderTarget.DrawRectangle(
+                self.rt().DrawRectangle(
                     &toD2DRect(inner),
                     brushCast(b),
                     width,
@@ -105,7 +126,7 @@ pub const D2DPainter = struct {
                 .radiusX = radius,
                 .radiusY = radius,
             };
-            self.device.rt.?.ID2D1RenderTarget.FillRoundedRectangle(&rr, brushCast(b));
+            self.rt().FillRoundedRectangle(&rr, brushCast(b));
         }
     }
 
@@ -151,7 +172,7 @@ pub const D2DPainter = struct {
             s.AddLines(&d2d_pts, @intCast(n - 1));
             s.EndFigure(.OPEN);
             _ = s.Close();
-            dev.rt.?.ID2D1RenderTarget.DrawGeometry(&geo.ID2D1Geometry, brushCast(b), width, null);
+            self.rt().DrawGeometry(&geo.ID2D1Geometry, brushCast(b), width, null);
         }
     }
 
@@ -169,7 +190,7 @@ pub const D2DPainter = struct {
                 .radiusX = rx,
                 .radiusY = ry,
             };
-            self.device.rt.?.ID2D1RenderTarget.FillEllipse(&e, brushCast(b));
+            self.rt().FillEllipse(&e, brushCast(b));
         }
     }
 
@@ -178,7 +199,7 @@ pub const D2DPainter = struct {
         if (brushFor(self, color)) |b| {
             const entry: *text_mod.TextSystemImpl.LayoutEntry = @fieldParentPtr("tl", @constCast(tl));
             const origin = d2d.common.D2D_POINT_2F{ .x = rect.x, .y = rect.y };
-            _ = self.device.rt.?.ID2D1RenderTarget.DrawTextLayout(
+            _ = self.rt().DrawTextLayout(
                 origin,
                 entry.dw_layout,
                 brushCast(b),
@@ -201,7 +222,7 @@ pub const D2DPainter = struct {
             self.clip_depth += 1;
         }
         const clip = toD2DRect(rect);
-        self.device.rt.?.ID2D1RenderTarget.PushAxisAlignedClip(
+        self.rt().PushAxisAlignedClip(
             &clip,
             .PER_PRIMITIVE,
         );
@@ -210,7 +231,7 @@ pub const D2DPainter = struct {
     fn implPopClip(impl: *anyopaque) void {
         const self = selfOf(impl);
         if (self.clip_depth > 0) self.clip_depth -= 1;
-        self.device.rt.?.ID2D1RenderTarget.PopAxisAlignedClip();
+        self.rt().PopAxisAlignedClip();
     }
 
     fn implClipIntersects(impl: *anyopaque, rect: geometry.Rect) bool {
@@ -222,12 +243,130 @@ pub const D2DPainter = struct {
     }
 
     fn brushFor(self: *D2DPainter, color: theme.Color) ?*d2d.ID2D1SolidColorBrush {
-        return self.device.brush_cache.brushFor(&self.device.rt.?.ID2D1RenderTarget, color);
+        return self.brushBank().brushFor(self.rt(), color);
     }
 };
 
+const log = std.log.scoped(.render);
+
 fn toD2DRect(r: geometry.Rect) d2d.common.D2D_RECT_F {
     return .{ .left = r.x, .top = r.y, .right = r.x + r.w, .bottom = r.y + r.h };
+}
+
+/// 装配滚动容器离屏表面宿主（§5.6 光栅缓存）。impl = device。
+pub fn asScrollHost(dev: *device_mod.Device) node.ScrollSurfaceHost {
+    return .{
+        .vtable = &.{
+            .paintScroll = &implPaintScroll,
+            .invalidate = &implSurfaceInvalidate,
+        },
+        .impl = dev,
+    };
+}
+
+/// 内部：内容/几何变化 → 置脏离屏表面，下帧重栅化（§5.6；滚动偏移变化不经过此路径）。
+fn implSurfaceInvalidate(impl: *anyopaque, n: *node.Node) void {
+    _ = n;
+    const dev: *device_mod.Device = @ptrCast(@alignCast(impl));
+    dev.surface_dirty = true;
+}
+
+/// 滚动容器离屏绘制（§5.6 光栅缓存）：未命中条带则整条带重栅化到离屏位图，
+/// 命中则直接 DrawBitmap 平移复用像素（本帧零文本栅格化）。两路径都返回 true（已处理）。
+fn implPaintScroll(impl: *anyopaque, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) bool {
+    const dev: *device_mod.Device = @ptrCast(@alignCast(impl));
+    const view = n.rect.inset(n.style.padding); // 视口（DIP，scroll 本地坐标）。
+    if (view.w <= 0 or view.h <= 0 or n.children.len == 0) return false; // 无可见视口/内容 → 走默认递归
+    const off = n.widget.scroll.offset_y;
+    const node_id: usize = @intFromPtr(n);
+    const view_w = view.w;
+    const view_h = view.h;
+    const strip_h = view_h * SURFACE_MULT;
+
+    const sf = &dev.surface;
+    const strip_half = strip_h * 0.5;
+    // 复用判定（§5.6）：内容未脏、仍属该 scroll、视口尺寸未变、平移仍在条带内 → 直接平移位图。
+    const reuse_src_y = (strip_half - view_h * 0.5) + (off - sf.anchor_off);
+    if (!dev.surface_dirty and sf.node_id == node_id and
+        geometry.approxEq(sf.view_w, view_w) and geometry.approxEq(sf.view_h, view_h) and
+        reuse_src_y >= 0 and reuse_src_y + view_h <= strip_h + 0.01)
+    {
+        if (sf.bitmap != null) {
+            blitSurface(dev, .{ .x = view.x, .y = view.y, .w = view_w, .h = view_h }, .{ .x = 0, .y = reuse_src_y, .w = view_w, .h = view_h });
+        }
+        return true;
+    }
+
+    // —— 重栅化：把当前可见区放条带中央，整条带光栅化到离屏位图 ——
+    const dpi = 96.0 * dev.dpi_scale;
+    const px_w: u32 = @intFromFloat(std.math.ceil(view_w * dev.dpi_scale));
+    const px_h: u32 = @intFromFloat(std.math.ceil(strip_h * dev.dpi_scale));
+    dev.beginSurface(px_w, px_h) catch return false;
+    const sdc = dev.surface.dc.?;
+    const srt = &sdc.ID2D1RenderTarget;
+    srt.SetDpi(dpi, dpi);
+    // 表面坐标 = 本地坐标 + (dx, dy)：把条带原点折到表面 (0,0)，children（本地坐标）随之落入条带。
+    // dx/dy 对齐物理像素（§5.1 snap）：若条带内容落在半像素，配合 blit 的像素对齐 snap，
+    // 不同 rebake anchor 下内容行会在 0/1px 间往返（滚动观感"没对齐"）。对齐后条带内容整体
+    // 落在整像素栅格上，blit 平移也保持整像素步进，内容位置稳定无往返。
+    const sc = dev.dpi_scale;
+    const dy = @as(f32, @floatFromInt(geometry.snap((strip_half - view_h * 0.5 - view.y) * sc))) / sc;
+    const dx = @as(f32, @floatFromInt(geometry.snap(-view.x * sc))) / sc;
+    var mat = d2d.common.D2D_MATRIX_3X2_F{
+        .Anonymous = .{ .Anonymous1 = .{ .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = dx, .dy = dy } },
+    };
+    srt.SetTransform(&mat);
+    srt.BeginDraw();
+    // 透明填充：露出主场景已绘的 scroll 背景（Node 层绘制）。
+    srt.Clear(&d2d.common.D2D_COLOR_F{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    // 离屏绘制：独立 painter 绑离屏 target & surface_brush（§5.6 目标必须匹配，防 D2DERR_WRONG_TARGET）。
+    var sp = D2DPainter{ .device = dev, .surf = true };
+    const spc = sp.ctx(pc.theme_ref);
+    // 条带裁剪（本地坐标；D2D 经 SetTransform 自动折换）。核心负责子节点绘制与 clipIntersects 剔除。
+    const strip_clip = geometry.Rect{ .x = view.x, .y = view.y + view_h * 0.5 - strip_half, .w = view_w, .h = strip_h };
+    t.paintChildrenInto(spc, n, strip_clip);
+    const herr = srt.EndDraw(null, null);
+    sdc.SetTarget(null);
+    dev.surface.in_use = false;
+    if (herr.failed) {
+        dev.surface_dirty = true; // 失败置脏，下帧重试。
+        return false;
+    }
+    // 记录本次条带元数据供后续复用判定。
+    sf.node_id = node_id;
+    sf.view_w = view_w;
+    sf.view_h = view_h;
+    sf.anchor_off = off;
+    dev.surface_dirty = false;
+    // 视口此时居条带中央：源 y = strip_half - view_h/2。
+    const rebaked_src_y = (strip_half - view_h * 0.5) + (off - sf.anchor_off);
+    blitSurface(dev, .{ .x = view.x, .y = view.y, .w = view_w, .h = view_h }, .{ .x = 0, .y = rebaked_src_y, .w = view_w, .h = view_h });
+    return true;
+}
+
+/// 离屏表面位图 → 主场景平移绘制（§5.6）：dest 为主场景矩形（DIP），src 为条带内源矩形（DIP）。
+/// 平移是原样移动、不改内容尺寸：**只把位置对齐物理像素（§5.1 snap），尺寸保留原始 view 宽高**——
+/// 若连 w/h 一起取整，会把内容拖到偶/奇整数尺寸，顶行被拉伸/+1px 缝隙（滚动"没对齐"）。
+/// 位置对齐 + 尺寸不变 → 内容 1:1、以整像素步进平移，无缩放、无顶行残边。
+fn blitSurface(dev: *device_mod.Device, dest: geometry.Rect, src: geometry.Rect) void {
+    const rt = dev.rt orelse return;
+    const bmp = dev.surface.bitmap orelse return;
+    const scale = dev.dpi_scale;
+    const w = dest.w;
+    const h = dest.h;
+    const d = geometry.Rect{
+        .x = @as(f32, @floatFromInt(geometry.snap(dest.x * scale))) / scale,
+        .y = @as(f32, @floatFromInt(geometry.snap(dest.y * scale))) / scale,
+        .w = w,
+        .h = h,
+    };
+    const s = geometry.Rect{
+        .x = @as(f32, @floatFromInt(geometry.snap(src.x * scale))) / scale,
+        .y = @as(f32, @floatFromInt(geometry.snap(src.y * scale))) / scale,
+        .w = w,
+        .h = h,
+    };
+    rt.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), 1.0, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
 }
 
 /// 矩形四边对齐物理像素网格（pixel snapping，§5.6）：DIP × scale 取整后再除回，

@@ -1,7 +1,6 @@
-//! examples/bench —— §4.9：Text 节点绘制性能。
-//! 顶部显示平均 FPS（30 帧滚动）；拖拽 resize 观察是否保持 60fps。
-//! 节点数默认 10000，可 `zig build run-bench -- <N>` 覆盖（§7.2 接受节点数参数；
-//! 1M 级应力测试可传 1000000，注意首次建树与 measure 会较慢）。
+//! examples/bench —— §4.9 + §5.6：Text 节点绘制性能（套上滚动容器，验证离屏光栅缓存）。
+//! 顶部显示平均 FPS（30 帧滚动）；内容在 scroll 容器内：滚动时表面 reuse（DrawBitmap 平移，
+//! 零文本栅格化），越出条带才 rebake。节点数默认 10000，可 `zig build run-bench -- <N>` 覆盖。
 //! CI 只编译不跑（防抖动，§7.2）；每里程碑人工跑一次记录进 CHANGELOG。
 
 const std = @import("std");
@@ -31,6 +30,8 @@ pub fn main(init: std.process.Init) anyerror!void {
 
     tree.root.layout = .{ .column = .{ .gap = theme.dark.spacing.xxs } };
     tree.root.style = .{ .padding = .all(theme.dark.spacing.xs) };
+    // 根即滚动容器（§5.6 光栅缓存套用）：内容整体可滚，滚动时表面复用平移像素。
+    tree.root.widget = .{ .scroll = .{} };
 
     const fps_label = try ui.widgets.builder.text(&tree, tree.root, "FPS: --", .{});
 
