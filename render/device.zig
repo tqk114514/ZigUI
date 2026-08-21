@@ -46,12 +46,13 @@ pub const RenderSurface = struct {
     in_use: bool = false,
     /// 圆角遮罩层对象（C 合成圆角裁剪）：PushLayer 用的 ID2D1Layer，blit 圆角遮罩复用。
     mask_layer: ?*d2d.ID2D1Layer = null,
-    /// 圆角遮罩 geometry（C）：ID2D1RoundedRectangleGeometry，主场景物理像素坐标，缓存复用以零分配。
+    /// 圆角遮罩 geometry（C）：ID2D1RoundedRectangleGeometry，**原点无关**（建在 (0,0,w,h)，
+    /// DIP），位置由 blit 侧 maskTransform 平移承担——层随滚动移动时零重建（L4）。
     mask_geom: ?*d2d.ID2D1RoundedRectangleGeometry = null,
-    /// 圆角遮罩缓存键：物理像素宽/高/圆角半径（三个齐变才重建 geometry）。
-    mask_px_w: u32 = 0,
-    mask_px_h: u32 = 0,
-    mask_radius_px: u32 = 0,
+    /// 圆角遮罩缓存键（DIP）：宽/高/半径（三个齐变才重建 geometry；位置不入键）。
+    mask_w: f32 = 0,
+    mask_h: f32 = 0,
+    mask_r: f32 = 0,
 
     // —— 复用判定元数据（§5.6）：条带（strip）参数（DIP，内容坐标）——
     /// 上次栅格化的层视口（DIP，内区尺寸）。

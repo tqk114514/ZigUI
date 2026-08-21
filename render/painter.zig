@@ -515,13 +515,14 @@ fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
     };
     if (radius > 0) {
         // 圆角合成（C）：PushLayer + ID2D1RoundedRectangleGeometry 几何遮罩，裁剪合成层四角。
-        // geometry/layer 对象按物理像素 dest 缓存于层槽（roundedMask），dest 不变则零分配复用。
+        // geometry 原点无关（(0,0,w,h)，DIP），位置经 maskTransform 平移到 dest——平移不入缓存键，
+        // 层随滚动/布局移动时零重建（L4）；dest 已对齐像素网格（上方 snap），圆角边缘保持锐利。
         if (roundedMask(dev, sf, d, radius)) |m| {
             const params = d2d.D2D1_LAYER_PARAMETERS{
                 .contentBounds = m.bounds,
                 .geometricMask = &m.geom.ID2D1Geometry,
                 .maskAntialiasMode = .PER_PRIMITIVE,
-                .maskTransform = .{ .Anonymous = .{ .Anonymous1 = .{ .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0 } } },
+                .maskTransform = m.transform,
                 .opacity = 1.0,
                 .opacityBrush = null,
                 .layerOptions = .{},
@@ -536,23 +537,20 @@ fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
     rt.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), opacity, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
 }
 
-/// 圆角遮罩（C）：取（或按需缓存重建）PushLayer 用的 layer 对象与圆角 geometry。geometry 与
-/// layer 均按物理像素 dest + 半径缓存于层槽；尺寸/半径变化才重建（帧路径零分配 L4）。失败返回 null。
+/// 圆角遮罩（C）：取（或按需缓存重建）PushLayer 用的 layer 对象与圆角 geometry。
+/// geometry 建在 (0,0,w,h)（DIP，与主 DC 坐标空间一致），**不含位置**——位置由返回的
+/// transform 平移承担。缓存键 = 宽/高/半径（DIP）：层随滚动纯平移时零重建（L4）；
+/// 若把位置烘进 geometry（旧实现），滚动移动 dest 而尺寸不变 → 复用旧位置遮罩，
+/// PushLayer 把层内容裁在屏幕固定旧矩形里（内容"钉住不动"，滚远即空白）。
+/// bounds 与 transform 每次按当前 dest 现算（无对象分配）。失败返回 null。
 const RoundMask = struct {
     bounds: d2d.common.D2D_RECT_F,
     geom: *d2d.ID2D1RoundedRectangleGeometry,
     layer: *d2d.ID2D1Layer,
+    transform: d2d.common.D2D_MATRIX_3X2_F,
 };
 
 fn roundedMask(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geometry.Rect, radius_dip: f32) ?RoundMask {
-    const scale = dev.dpi_scale;
-    const x0 = geometry.snap(dest.x * scale);
-    const y0 = geometry.snap(dest.y * scale);
-    const x1 = geometry.snap((dest.x + dest.w) * scale);
-    const y1 = geometry.snap((dest.y + dest.h) * scale);
-    const pw: u32 = @intCast(@max(0, x1 - x0));
-    const ph: u32 = @intCast(@max(0, y1 - y0));
-    const radius_px: u32 = @intCast(@max(0, geometry.snap(radius_dip * scale)));
     if (sf.mask_layer == null) {
         // layer 对象由 ID2D1RenderTarget 接口创建（DeviceContext 内嵌该基类成员，§5.6）。
         const rtc = &dev.rt.?.ID2D1RenderTarget;
@@ -560,26 +558,29 @@ fn roundedMask(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
         if (rtc.CreateLayer(null, &lo).failed) return null;
         sf.mask_layer = lo;
     }
-    if (sf.mask_geom == null or pw != sf.mask_px_w or ph != sf.mask_px_h or radius_px != sf.mask_radius_px) {
-        // geometry 必须与主 rt 同工厂（dev.path_factory，§5.6），否则 DrawGeometry 报 WRONG_FACTORY。
+    if (sf.mask_geom == null or !geometry.approxEq(dest.w, sf.mask_w) or
+        !geometry.approxEq(dest.h, sf.mask_h) or !geometry.approxEq(radius_dip, sf.mask_r))
+    {
+        // geometry 必须与主 rt 同工厂（dev.path_factory，§5.6），否则报 WRONG_FACTORY。
         const fac = dev.path_factory orelse return null;
         var g: *d2d.ID2D1RoundedRectangleGeometry = undefined;
         const rr = d2d.D2D1_ROUNDED_RECT{
-            .rect = .{ .left = @floatFromInt(x0), .top = @floatFromInt(y0), .right = @floatFromInt(x1), .bottom = @floatFromInt(y1) },
-            .radiusX = @floatFromInt(radius_px),
-            .radiusY = @floatFromInt(radius_px),
+            .rect = .{ .left = 0, .top = 0, .right = dest.w, .bottom = dest.h },
+            .radiusX = radius_dip,
+            .radiusY = radius_dip,
         };
         if (fac.CreateRoundedRectangleGeometry(&rr, &g).failed) return null;
         if (sf.mask_geom) |old| _ = old.IUnknown.Release();
         sf.mask_geom = g;
-        sf.mask_px_w = pw;
-        sf.mask_px_h = ph;
-        sf.mask_radius_px = radius_px;
+        sf.mask_w = dest.w;
+        sf.mask_h = dest.h;
+        sf.mask_r = radius_dip;
     }
     return .{
-        .bounds = .{ .left = @floatFromInt(x0), .top = @floatFromInt(y0), .right = @floatFromInt(x1), .bottom = @floatFromInt(y1) },
+        .bounds = .{ .left = dest.x, .top = dest.y, .right = dest.x + dest.w, .bottom = dest.y + dest.h },
         .geom = sf.mask_geom.?,
         .layer = sf.mask_layer.?,
+        .transform = .{ .Anonymous = .{ .Anonymous1 = .{ .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = dest.x, .dy = dest.y } } },
     };
 }
 
