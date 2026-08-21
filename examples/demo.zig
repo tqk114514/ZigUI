@@ -59,12 +59,30 @@ fn addEdit(t: *T, text: []const u8) !void {
     try t.appendChild(t.root, e);
 }
 
+/// 建一个静态 node.layer 层盒（C 层合成演示）：层内铺背景色 + 文字，由父（布局容器）排布给
+/// 正常坐标 rect，合成按 alpha / scale / z 属性生效。层盒自身即容器（bg + 文字子节点）。
+fn addCBox(t: *T, parent: *ui.core.node.Node, txt: []const u8, color: theme.Color, alpha: f32, scale: f32, z: f32) !void {
+    const l = try t.createNode(parent);
+    l.layer = true;
+    l.layer_alpha = alpha;
+    l.layer_scale = scale;
+    l.layer_z = z;
+    l.layout = .{ .column = .{ .gap = theme.light.spacing.xxs } };
+    l.style = .{ .bg = color, .padding = .all(theme.light.spacing.xs) };
+    try t.appendChild(parent, l);
+    const tx = try t.createNode(l);
+    tx.widget = .{ .text = .{ .text = try t.allocStr(txt), .font = theme.light.font_caption, .color = theme.light.accent_text } };
+    try t.appendChild(l, tx);
+}
+
 pub fn main() anyerror!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var tree = try ui.core.node.Tree.init(arena.allocator(), &theme.light);
     defer tree.deinit();
 
+    // 根即滚动容器（C 使内容超窗可滚、不超窗 offset 钳到 0 不可滚）。
+    tree.root.widget = .{ .scroll = .{} };
     tree.root.layout = .{ .column = .{ .gap = theme.light.spacing.md } };
     // 内容与窗口四边保持最小间距（类似 Web body 的隔离，防止 UI 贴边；§5.3 padding 语义）。
     tree.root.style = .{ .padding = .all(theme.light.spacing.md), .bg = theme.light.bg_window };
@@ -96,6 +114,52 @@ pub fn main() anyerror!void {
     try addLabel(&tree, "输入框 EDIT");
     try addEdit(&tree, "hello 世界");
 
+    // 缓存层（§5.6 分层）：两个独立 node.layer 子树并排，各自离屏缓存、互不干扰
+    //（批量文本可在 scroll 层里看复用；此处验证多并发静态层正确合成）。
+    try addLabel(&tree, "缓存层 LAYERS");
+    {
+        const row = try addRow(&tree);
+        const LayerBox = struct {
+            fn box(t: *T, parent: *ui.core.node.Node, txt: []const u8) !*ui.core.node.Node {
+                const b = try t.createNode(parent);
+                b.layout = .{ .column = .{ .gap = theme.light.spacing.xxs } };
+                b.style = .{ .bg = theme.light.bg_surface, .padding = .all(theme.light.spacing.sm) };
+                b.layer = true; // 提升为独立缓存层：内容变才重栅化，父级越过不重绘它。
+                try t.appendChild(parent, b);
+                const tx = try t.createNode(b);
+                tx.widget = .{ .text = .{ .text = try t.allocStr(txt), .font = theme.light.font_caption } };
+                try t.appendChild(b, tx);
+                return b;
+            }
+        };
+        _ = try LayerBox.box(&tree, row, "静态层 A");
+        _ = try LayerBox.box(&tree, row, "静态层 B");
+    }
+
+    // 层合成增强 C：node.layer 的 alpha / scale / z 合成属性演示（层盒由布局容器排布）。
+    try addLabel(&tree, "层合成 ALPHA（半透明层透出下面深色行底色）");
+    {
+        const row = try addRow(&tree);
+        row.style = .{ .bg = theme.light.text }; // 深底色，衬托半透明透出。
+        try addCBox(&tree, row, "不透明 1.0", theme.light.danger, 1.0, 1.0, 0);
+        try addCBox(&tree, row, "半透明 0.5", theme.light.accent, 0.5, 1.0, 0);
+    }
+
+    try addLabel(&tree, "层合成 SCALE（右为缩放 0.8，同内容更小）");
+    {
+        const row = try addRow(&tree);
+        try addCBox(&tree, row, "缩放 1.0", theme.light.accent, 1.0, 1.0, 0);
+        try addCBox(&tree, row, "缩放 0.8", theme.light.accent, 1.0, 0.8, 0);
+    }
+
+    try addLabel(&tree, "层合成 Z（z 排序层属性；并排展示两盒）");
+    {
+        const row = try addRow(&tree);
+        try addCBox(&tree, row, "A z=2", theme.light.accent, 1.0, 1.0, 2);
+        try addCBox(&tree, row, "B z=1", theme.light.danger, 1.0, 1.0, 1);
+    }
+
     const title = std.unicode.utf8ToUtf16LeStringLiteral("ZigUI DEMO");
-    _ = try ui.platform.window.run(.{ .title = title, .theme_ref = &theme.light }, &tree);
+    // 初始高度取大以容纳全部分区（含层合成 C 示例）；收窄后由根 scroll 兜底滚动。
+    _ = try ui.platform.window.run(.{ .title = title, .theme_ref = &theme.light, .height = 860 }, &tree);
 }

@@ -52,6 +52,9 @@ pub const Options = struct {
     width: i32 = 960,
     /// 初始客户区高度（物理像素）。
     height: i32 = 600,
+    /// 窗口最小尺寸（DIP，业界默认 320×200；resize 不可再小）。
+    min_width: f32 = 320,
+    min_height: f32 = 200,
     /// 主题引用（§5.12：theme 是共享常量）。
     theme_ref: *const theme.Theme = &theme.dark,
     /// 可选：run 创建任务桥后回填指针，供调用方（如 worker 线程）调 Ui.post。
@@ -104,6 +107,8 @@ const WindowCtx = struct {
     maximize_dirty: bool = false,
     /// 标题栏需局部重绘（§5.4）：按钮 hover/press 变化时置位，renderFrame 把整条 strip 并入脏区。
     tb_dirty: bool = false,
+    /// 窗口最小尺寸（DIP）：resize 不可再小（WM_GETMINMAXINFO 设 ptMinTrackSize）。
+    min_dip: geometry.Size = .{ .width = 320, .height = 200 },
 };
 
 /// 光标闪烁定时器 ID（§5.8：WM_TIMER 530ms，仅 focus 时启动）。
@@ -217,6 +222,7 @@ pub fn run(opts: Options, tree: *node.Tree) !RunResult {
         .ime = .{ .hwnd = hwnd },
         .title_utf8 = title_utf8,
         .titlebar_active = opts.use_titlebar,
+        .min_dip = .{ .width = opts.min_width, .height = opts.min_height },
     };
     _ = w32.user32.SetWindowLongPtrW(hwnd, .P_USERDATA, @bitCast(@intFromPtr(&ctx)));
     defer _ = w32.user32.DestroyWindow(hwnd);
@@ -590,6 +596,11 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
         w32.windows_and_messaging.WM_GETMINMAXINFO => {
             if (ctx != null and ctx.?.titlebar_active) {
                 const mm: *w32.windows_and_messaging.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(l_param)));
+                // 最小尺寸（DIP → 物理像素×scale；含非客户区边框）。
+                const scale = ctx.?.device.?.dpi_scale;
+                const minw = @as(i32, @intFromFloat(ctx.?.min_dip.width * scale)) + frameBorderPx(scale) * 2;
+                const minh = @as(i32, @intFromFloat(ctx.?.min_dip.height * scale)) + frameBorderPx(scale) * 2 + @as(i32, @intFromFloat(TITLEBAR_H * scale));
+                mm.ptMinTrackSize = .{ .x = minw, .y = minh };
                 // 最大化填满工作区（不遮任务栏）。
                 const mon = w32.user32.MonitorFromWindow(hwnd, w32.gdi.MONITOR_DEFAULTTONEAREST);
                 var mi: w32.gdi.MONITORINFO = undefined;

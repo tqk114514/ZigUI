@@ -20,9 +20,19 @@ const text = @import("text.zig");
 
 const log = std.log.scoped(.render);
 
-/// 离屏光栅表面（§5.6 光栅缓存）：独立 DC + TARGET 位图，滚动容器内容条带缓存，
-/// 滚动时 DrawSurface 平移复用像素，越出条带才重栅化。
+/// 并发层上限（§5.6 分层）：同一帧最多可同时栅格的独立离屏层数（滚动层 + node.layer 子树）。
+/// 层数超限时 acquireLayer 返回 null，调用方降级为普通子递归（宁可层失效也不释放活跃槽，防 UAF）。
+const MAX_LAYERS: usize = 24;
+
+/// 离屏层槽（§5.6 光栅缓存/分层）：独立 DC + TARGET 位图 + 各自 brush 缓存。
+/// Device 持有一池，按 node_id 索引，多棵树提升的层各自占用一个槽、互不影响。
 pub const RenderSurface = struct {
+    /// 该槽是否被占用（分配了 node 关联的层）。
+    used: bool = false,
+    /// 关联的层节点地址（node_id；换节点强制重栅化；不代入核心类型避免依赖）。
+    node_id: usize = 0,
+    /// 该层内容是否已脏：内容/几何变化置脏，下次绘制须重栅化；变换变化（滚动平移）不置脏（复用前提）。
+    dirty: bool = true,
     /// 离屏 DC（从同 d2d_device 另建，独立于主 rt；避免与主 target 争用）。
     dc: ?*d2d.ID2D1DeviceContext = null,
     /// 离屏 TARGET 位图（CreateBitmap 建，非交换链表面）。物理像素尺寸。
@@ -30,16 +40,24 @@ pub const RenderSurface = struct {
     /// 位图物理像素宽高。
     px_w: u32 = 0,
     px_h: u32 = 0,
+    /// 离屏绘制专用 brush 缓存：brush 绑离屏 target，与主 rt 隔离（D2DERR_WRONG_TARGET 前提，§5.6）。
+    brush: cache.BrushCache = undefined,
     /// 是否正被本帧占用（栅格化中；用完即解绑 target）。
     in_use: bool = false,
+    /// 圆角遮罩层对象（C 合成圆角裁剪）：PushLayer 用的 ID2D1Layer，blit 圆角遮罩复用。
+    mask_layer: ?*d2d.ID2D1Layer = null,
+    /// 圆角遮罩 geometry（C）：ID2D1RoundedRectangleGeometry，主场景物理像素坐标，缓存复用以零分配。
+    mask_geom: ?*d2d.ID2D1RoundedRectangleGeometry = null,
+    /// 圆角遮罩缓存键：物理像素宽/高/圆角半径（三个齐变才重建 geometry）。
+    mask_px_w: u32 = 0,
+    mask_px_h: u32 = 0,
+    mask_radius_px: u32 = 0,
 
     // —— 复用判定元数据（§5.6）：条带（strip）参数（DIP，内容坐标）——
-    /// 上次栅格化关联的 scroll 节点（地址标识，换节点强制重栅化；不代入核心类型避免依赖）。
-    node_id: usize = 0,
-    /// 上次栅格化的 scroll 视口（DIP，内区尺寸）。
+    /// 上次栅格化的层视口（DIP，内区尺寸）。
     view_w: f32 = 0,
     view_h: f32 = 0,
-    /// 上次栅格化时的 scroll 内容偏移（DIP）：此刻条带中心对齐视口。
+    /// 上次栅格化时的滚动 offset（DIP）：此刻条带中心对齐视口。非滚动层恒 0。
     anchor_off: f32 = 0,
 };
 
@@ -86,12 +104,13 @@ pub const Device = struct {
     text_system: text.TextSystemImpl,
     /// 折线绘制用 path geometry（strokePolyline 复用，惰性创建；§5.6 禁止每帧建对象）。
     path_geometry: ?*d2d.ID2D1PathGeometry = null,
-    /// 离屏光栅表面（§5.6）：滚动容器内容缓存的单例可复用表面。
-    surface: RenderSurface = .{},
-    /// 离屏绘制专用 brush 缓存：brush 绑离屏 target，与主 rt 隔离（D2DERR_WRONG_TARGET 前提，§5.6）。
-    surface_brush: cache.BrushCache,
-    /// 表面内容是否已脏：内容/几何变化或首次置脏，下帧重栅化；滚动偏移变化不置脏（复用前提）。
-    surface_dirty: bool = true,
+    /// 离屏层池（§5.6 分层）：多棵子树提升的层各占一个槽，按 node_id 索引复用。
+    /// 显式初始化（防元素垃圾导致 acquireLayer 误判槽占用）。
+    layers: [MAX_LAYERS]RenderSurface = init: {
+        var a: [MAX_LAYERS]RenderSurface = undefined;
+        for (&a) |*s| s.* = .{ .brush = undefined };
+        break :init a;
+    },
 
     /// 创建设备。失败返回错误（可失败边界，§4.2）。
     pub fn init(allocator: std.mem.Allocator, hwnd: win32.HWND) !*Device {
@@ -115,7 +134,6 @@ pub const Device = struct {
             .dwrite_factory = dwrite_factory,
             .hwnd = hwnd,
             .brush_cache = cache.BrushCache.init(allocator),
-            .surface_brush = cache.BrushCache.init(allocator),
             .text_system = text.TextSystemImpl.init(allocator, dwrite_factory),
         };
         // GPU 管线（D3D11 设备 + DXGI 工厂 + D2D 设备；交换链惰性创建）失败时清理已建的 COM 对象。
@@ -395,61 +413,95 @@ pub const Device = struct {
         self.frame_h = self.px_height;
     }
 
-    /// 释放离屏表面（DC + 位图 + 表面 brush），设备丢失重建/废弃时调用。
-    fn releaseSurface(self: *Device) void {
-        self.surface_dirty = true;
-        if (self.surface.in_use) {
-            if (self.surface.dc) |d| d.SetTarget(null); // 先解绑 target 再释放（§5.6 翻转丢弃前提）。
-            self.surface.in_use = false;
+    /// 获取（或建立）node_id 对应的离屏层槽，并保证其位图 ≥ 指定物理像素尺寸（§5.6 分层）。
+    /// 命中既有槽且尺寸够 → 复用；尺寸不足 → 原地重建位图；**无空闲槽 → 返回 null**（不走驱逐：
+    /// 本帧其它层槽可能正被 painter 引用，驱逐会造成 UAF；调用方收到 null 降级为普通子递归）。
+    pub fn acquireLayer(self: *Device, node_id: usize, px_w: u32, px_h: u32) ?*RenderSurface {
+        if (px_w == 0 or px_h == 0) return null;
+        // 命中既有槽。
+        var empty: ?usize = null;
+        for (0..MAX_LAYERS) |i| {
+            const sf = &self.layers[i];
+            if (!sf.used) {
+                if (empty == null) empty = i;
+                continue;
+            }
+            if (sf.node_id == node_id) {
+                if (sf.bitmap != null and px_w <= sf.px_w and px_h <= sf.px_h) return sf;
+                return self.prepareLayer(i, node_id, px_w, px_h);
+            }
         }
-        if (self.surface.bitmap) |b| _ = b.IUnknown.Release();
-        if (self.surface.dc) |d| _ = d.IUnknown.Release();
-        self.surface = .{};
-        self.surface_brush.reset();
+        // 无空闲且无命中 → 返回 null（安全降级，不释放活跃槽）。
+        const i = empty orelse return null;
+        return self.prepareLayer(i, node_id, px_w, px_h);
     }
 
-    /// 准备离屏表面到 ≥ 指定物理像素尺寸（首帧/尺寸不足时建 DC 与位图并绑定 target）。
-    /// 调用方随后负责 SetDpi/SetTransform/BeginDraw/画内容/EndDraw，并 SetTarget(null) 归还。
-    pub fn beginSurface(self: *Device, px_w: u32, px_h: u32) !void {
-        if (px_w == 0 or px_h == 0) return error.EmptySurface;
-        const dpi = 96.0 * self.dpi_scale;
-        if (self.surface.dc == null) {
-            // 从同 d2d_device 另建独立 DC：避免与主 rt 争用 target（§5.6 光栅缓存）。
+    /// 在槽 i 上建立（或重建）node 的层：DC + 位图 + brush 缓存（§5.6）。
+    /// 只应在 acquireLayer 决定"新建或重建位图"时调用，此时内容必失效（dirty=true）。
+    fn prepareLayer(self: *Device, i: usize, node_id: usize, px_w: u32, px_h: u32) ?*RenderSurface {
+        const sf = &self.layers[i];
+        if (!sf.used) sf.brush = cache.BrushCache.init(self.allocator); // 槽首次占用：建 brush 缓存。
+        sf.used = true;
+        sf.node_id = node_id;
+        sf.dirty = true; // 新建或重建位图 → 内容失效，须重栅化。
+        if (sf.dc == null) {
             var dc: *d2d.ID2D1DeviceContext = undefined;
-            if (self.d2d_device.?.CreateDeviceContext(d2d.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc).failed) {
-                return error.SurfaceDcFailed;
-            }
-            self.surface.dc = dc;
+            if (self.d2d_device.?.CreateDeviceContext(d2d.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc).failed) return null;
+            sf.dc = dc;
         }
-        // 尺寸不足 → 重建更大位图（条带变化；view/node 变化由 paintScroll 判定重栅化）。
-        if (self.surface.bitmap == null or px_w > self.surface.px_w or px_h > self.surface.px_h) {
-            if (self.surface.bitmap) |b| _ = b.IUnknown.Release();
-            const props = d2d.D2D1_BITMAP_PROPERTIES1{
-                .pixelFormat = .{
-                    .format = .B8G8R8A8_UNORM,
-                    .alphaMode = d2d.common.D2D1_ALPHA_MODE.PREMULTIPLIED,
-                },
-                .dpiX = dpi,
-                .dpiY = dpi,
-                .bitmapOptions = .{ .TARGET = 1, .CANNOT_DRAW = 0 },
-                .colorContext = null,
-            };
-            var bmp: *d2d.ID2D1Bitmap1 = undefined;
-            if (self.surface.dc.?.CreateBitmap(.{ .width = px_w, .height = px_h }, null, 0, &props, &bmp).failed) {
-                return error.SurfaceBitmapFailed;
-            }
-            self.surface.bitmap = bmp;
-            self.surface.px_w = px_w;
-            self.surface.px_h = px_h;
+        if (sf.bitmap != null and px_w <= sf.px_w and px_h <= sf.px_h) return sf; // 尺寸仍够（复用）。
+        if (sf.bitmap) |b| _ = b.IUnknown.Release();
+        const dpi = 96.0 * self.dpi_scale;
+        const props = d2d.D2D1_BITMAP_PROPERTIES1{
+            .pixelFormat = .{
+                .format = .B8G8R8A8_UNORM,
+                .alphaMode = d2d.common.D2D1_ALPHA_MODE.PREMULTIPLIED,
+            },
+            .dpiX = dpi,
+            .dpiY = dpi,
+            .bitmapOptions = .{ .TARGET = 1, .CANNOT_DRAW = 0 },
+            .colorContext = null,
+        };
+        var bmp: *d2d.ID2D1Bitmap1 = undefined;
+        if (sf.dc.?.CreateBitmap(.{ .width = px_w, .height = px_h }, null, 0, &props, &bmp).failed) return null;
+        sf.bitmap = bmp;
+        sf.px_w = px_w;
+        sf.px_h = px_h;
+        return sf;
+    }
+
+    /// 置脏 node_id 对应层的离屏缓存：下帧须重栅化（§5.6；内容/几何变化路径）。
+    pub fn invalidateLayer(self: *Device, node_id: usize) void {
+        for (&self.layers) |*sf| {
+            if (sf.used and sf.node_id == node_id) sf.dirty = true;
         }
-        self.surface.in_use = true;
-        // 绑定离屏位图为绘制目标（与主交换链 target 相互独立，§5.6）。
-        self.surface.dc.?.SetTarget(&self.surface.bitmap.?.ID2D1Image);
+    }
+
+    /// 释放第 i 个层槽（DC + 位图 + brush），标记空闲。设备丢失重建/池驱逐共用。
+    fn releaseLayer(self: *Device, i: usize) void {
+        const sf = &self.layers[i];
+        if (!sf.used) return;
+        if (sf.in_use) {
+            if (sf.dc) |d| d.SetTarget(null); // 先解绑 target 再释放（§5.6 翻转丢弃前提）。
+            sf.in_use = false;
+        }
+        if (sf.bitmap) |b| _ = b.IUnknown.Release();
+        if (sf.dc) |d| _ = d.IUnknown.Release();
+        // 圆角遮罩缓存（C）：geometry 绑定 path_factory、layer 绑定 rt，随层槽一并释放。
+        if (sf.mask_geom) |g| _ = g.IUnknown.Release();
+        if (sf.mask_layer) |l| _ = l.IUnknown.Release();
+        sf.brush.deinit();
+        self.layers[i] = .{};
+    }
+
+    /// 释放全部层槽（设备丢失重建/废弃）。
+    fn releaseAllLayers(self: *Device) void {
+        for (0..MAX_LAYERS) |i| self.releaseLayer(i);
     }
 
     /// 释放 GPU 管线对象与 brush 缓存（设备丢失/重建共用；text 系统保留）。
     fn releaseGpu(self: *Device) void {
-        self.releaseSurface();
+        self.releaseAllLayers();
         self.releaseSwapChain();
         if (self.rt) |rt| _ = rt.IUnknown.Release();
         if (self.d2d_device) |d| _ = d.IUnknown.Release();
@@ -552,10 +604,9 @@ pub const Device = struct {
 
     /// 释放设备与全部缓存（GPU 管线 / render target / brush / 工厂）。
     pub fn deinit(self: *Device) void {
-        // releaseGpu 释放 GPU 管线、surface、brush 与 path geometry（保留 text 系统/dwrite 工厂）。
+        // releaseGpu 释放 GPU 管线、全部层槽、brush 与 path geometry（保留 text 系统/dwrite 工厂）。
         self.releaseGpu();
         self.brush_cache.deinit();
-        self.surface_brush.deinit();
         _ = self.dwrite_factory.IUnknown.Release();
         const a = self.allocator;
         a.destroy(self);

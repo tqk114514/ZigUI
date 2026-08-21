@@ -72,6 +72,20 @@ pub const Node = struct {
     /// 以层变换（平移）合成到主场景；内容变化时层失效重栅化，仅变换（如滚动平移）不重栅化。
     /// 提供宿主（tree.layer_host）时生效；scroll 由 widget 隐式成为层。
     layer: bool = false,
+    /// 层合成透明度（C）：本节点作为层节点（scroll / node.layer）合成到主场景时的 opacity，
+    /// 取值 [0,1]，1.0 = 不透明。位图栅格化不变，仅 DrawBitmap 的 opacity 生效。非层节点忽略。
+    layer_alpha: f32 = 1.0,
+    /// 层合成显式 z（C）：同一父下的层节点兄弟按 layer_z **升序**合成（z 大者盖在之上；
+    /// 相同保持声明序）。非层子节点仍按树序、相对位置不变。仅对层节点兄弟的合成顺序生效。
+    layer_z: f32 = 0,
+    /// 层合成缩放（C）：静态 node.layer 层以 factor 硬件缩放合成（≥0，1.0 不变）。
+    /// 合成 dest 尺寸 = 层视口 × factor，位图保持自然分辨率，DrawBitmap 硬件缩放源的映射。
+    /// 仅静态 node.layer 生效；scroll 层恒 1:1。
+    layer_scale: f32 = 1.0,
+    /// absolute（layout .none）容器下手填子矩形（§5.3 坐标语义）：**父内容区局部坐标**，
+    /// 由 arrange 一次性提升为父坐标（根空间）。是绝对子布局的唯一输入；不随 arrange 覆盖
+    /// （rect 会被改为父坐标值，hand_rect 保持手填原值，防每帧重复提升漂移）。
+    hand_rect: geo.Rect = .{},
     /// 控件数据（Widget union）。
     widget: widget.Widget = .none,
     /// 测量脏标记（invalidateMeasure 沿祖先链置位）。
@@ -427,8 +441,12 @@ pub const Tree = struct {
 
         switch (n.layout) {
             .none => {
-                // 绝对定位：不流动布局，仅递归（子节点 rect 由调用方手填）。
-                for (n.children) |child| t.arrange(child, child.rect);
+                // 绝对定位（§5.3 坐标语义）：子用 hand_rect（父内容区局部）手填，此处一次性提升为
+                // 父坐标（根空间，与布局子树一致）——否则 paint 剔除/层合成用根空间 clip，局部 rect 会被误剔。
+                for (n.children) |child| {
+                    const hr = child.hand_rect;
+                    t.arrange(child, .{ .x = inner.x + hr.x, .y = inner.y + hr.y, .w = hr.w, .h = hr.h });
+                }
             },
             .row, .column => |st| {
                 t.relayout_count += 1;
@@ -767,8 +785,60 @@ fn paintNode(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
     // 内容区裁剪后递归子节点。
     const inner = n.rect.inset(n.style.padding);
     pc.pushClip(inner);
-    for (n.children) |c| paintNode(t, pc, c);
+    drawChildren(t, pc, n);
     pc.popClip();
+}
+
+/// 子节点绘制步进 _Order（C）：记录原始声明序号，供稳定排序保持非层节点相对位置与
+/// 层节点同 z 时的声明序。
+const _Order = struct {
+    node: *Node,
+    idx: usize,
+};
+
+/// 并行绘制父节点的子节点（C 层合成 z 排序）：同一父下存在 ≥2 个层节点兄弟时，
+/// 在**连续层节点 run** 内按 layer_z 升序合成（z 大者盖在之上；相等保持声明序），
+/// 非层节点保持树序且不被越界（run 边界即非层节点，绝不跨界）。无排序需求时
+/// 零成本走声明序遍历（L4）。
+/// 用栈上固定缓冲 + 相邻交换（bubble），帧路径零分配；子节点数超缓冲时退化为声明序。
+fn drawChildren(t: *Tree, pc: painter.PaintCtx, n: *Node) void {
+    var layer_cnt: usize = 0;
+    for (n.children) |c| {
+        if (isLayerNode(c)) layer_cnt += 1;
+    }
+    if (layer_cnt < 2) {
+        for (n.children) |c| paintNode(t, pc, c);
+        return;
+    }
+    const MAX_ORDER = 256;
+    var order: [MAX_ORDER]_Order = undefined;
+    const cnt = @min(n.children.len, MAX_ORDER);
+    for (n.children[0..cnt], 0..) |c, i| order[i] = .{ .node = c, .idx = i };
+    // 逐位左向 bubble：层节点只在连续层节点 run 内按 z 前移，遇非层节点即停（位置不动）。
+    var i: usize = 0;
+    while (i < cnt) : (i += 1) {
+        if (!isLayerNode(order[i].node)) continue;
+        var j = i;
+        while (j > 0) {
+            if (!isLayerNode(order[j - 1].node)) break; // run 边界：不跨非层节点。
+            if (!_after(order[j - 1], order[j])) break; // 相邻已有序（含同 z 稳定）。
+            const tmp = order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = tmp;
+            j -= 1;
+        }
+    }
+    for (order[0..cnt]) |e| paintNode(t, pc, e.node);
+    // 超缓冲的尾部子节点按声明序补画（罕见，仅文档说明行为）。
+    var k = cnt;
+    while (k < n.children.len) : (k += 1) paintNode(t, pc, n.children[k]);
+}
+
+/// 层合成 z 比较：a 是否应排在 b 之后。仅对同一连续 run 内的两个层节点调用——
+/// 按 layer_z 升序，相等保持声明序（稳定）。
+fn _after(a: _Order, b: _Order) bool {
+    if (a.node.layer_z != b.node.layer_z) return a.node.layer_z > b.node.layer_z;
+    return a.idx > b.idx;
 }
 
 // —— 测试辅助：固定尺寸的 custom 叶子 ——
@@ -901,15 +971,15 @@ test "hit test passes through pointer_pass and skips invisible" {
     var t = try Tree.init(arena.allocator(), &theme.light);
     defer t.deinit();
 
-    // 绝对定位，手动给 rect：normal 在下，solid 覆盖其上且 pointer_pass。
+    // 绝对定位，手动给 hand_rect：normal 在下，solid 覆盖其上且 pointer_pass。
     t.root.layout = .{ .none = {} };
     const normal = try addFixedLeaf(&t, t.root, .{ .width = 60, .height = 60 });
-    normal.rect = .{ .w = 60, .h = 60 };
+    normal.hand_rect = .{ .w = 60, .h = 60 };
     const solid = try addFixedLeaf(&t, t.root, .{ .width = 60, .height = 60 });
-    solid.rect = .{ .w = 60, .h = 60 };
+    solid.hand_rect = .{ .w = 60, .h = 60 };
     solid.flags.pointer_pass = true;
     const hidden = try addFixedLeaf(&t, t.root, .{ .width = 60, .height = 60 });
-    hidden.rect = .{ .x = 70, .w = 60, .h = 60 };
+    hidden.hand_rect = .{ .x = 70, .w = 60, .h = 60 };
     hidden.flags.visible = false;
 
     t.ensureLayout(.{ .width = 200, .height = 200 });
@@ -1017,6 +1087,140 @@ test "disabled node is not a hover target" {
     try std.testing.expect(t.hover == null);
 }
 
+test "z sort: layer node siblings composite by layer_z ascending (higher z on top)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .none;
+    t.root.rect = .{ .w = 100, .h = 100 };
+    const low = try t.createNode(t.root);
+    low.layer = true;
+    low.layer_z = 1;
+    low.style.bg = theme.light.accent;
+    low.rect = .{ .w = 40, .h = 40 };
+    const high = try t.createNode(t.root);
+    high.layer = true;
+    high.layer_z = 2;
+    high.style.bg = theme.light.danger;
+    high.rect = .{ .w = 40, .h = 40 };
+    try t.replaceChildren(t.root, &.{ low, high });
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+    t.paint(mp.ctx);
+
+    // fillRect 序列 = z 升序：accent(z=1) 先画，danger(z=2) 覆盖在其上。
+    var colors: [2]theme.Color = undefined;
+    var ci: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect and ci < 2) {
+            colors[ci] = c.fillRect.color;
+            ci += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), ci);
+    try std.testing.expect(colorEq(colors[0], theme.light.accent));
+    try std.testing.expect(colorEq(colors[1], theme.light.danger));
+}
+
+test "z sort: equal layer_z keeps declaration order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .none;
+    t.root.rect = .{ .w = 100, .h = 100 };
+    const first = try t.createNode(t.root);
+    first.layer = true;
+    first.layer_z = 0;
+    first.style.bg = theme.light.accent;
+    first.rect = .{ .w = 40, .h = 40 };
+    const second = try t.createNode(t.root);
+    second.layer = true;
+    second.layer_z = 0;
+    second.style.bg = theme.light.danger;
+    second.rect = .{ .w = 40, .h = 40 };
+    try t.replaceChildren(t.root, &.{ first, second });
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+    t.paint(mp.ctx);
+
+    var colors: [2]theme.Color = undefined;
+    var ci: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect and ci < 2) {
+            colors[ci] = c.fillRect.color;
+            ci += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), ci);
+    try std.testing.expect(colorEq(colors[0], theme.light.accent));
+    try std.testing.expect(colorEq(colors[1], theme.light.danger));
+}
+
+test "z sort: contiguous layer run reorders by layer_z, plain siblings keep position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    t.root.layout = .none;
+    t.root.rect = .{ .w = 100, .h = 100 };
+    // 声明序：普通盒、层(mid z=1,danger)、层(high z=2,accent)、层(low z=0)、普通盒尾。
+    // 连续层节点 run = [mid, high, low]，bubble 后按 z 升序 → [low, mid, high]；
+    // 首尾普通盒位置不动（不进入 run）。
+    const plain_0 = try t.createNode(t.root);
+    plain_0.style.bg = theme.light.border;
+    plain_0.rect = .{ .x = 0, .w = 10, .h = 10 };
+
+    const mid = try t.createNode(t.root);
+    mid.layer = true;
+    mid.layer_z = 1;
+    mid.style.bg = theme.light.danger;
+    mid.rect = .{ .x = 10, .w = 20, .h = 20 };
+
+    const high = try t.createNode(t.root);
+    high.layer = true;
+    high.layer_z = 2;
+    high.style.bg = theme.light.accent;
+    high.rect = .{ .x = 12, .w = 20, .h = 20 };
+
+    const low = try t.createNode(t.root);
+    low.layer = true;
+    low.layer_z = 0;
+    low.style.bg = theme.light.bg_surface;
+    low.rect = .{ .x = 14, .w = 20, .h = 20 };
+
+    const plain_1 = try t.createNode(t.root);
+    plain_1.style.bg = theme.light.text_weak;
+    plain_1.rect = .{ .x = 90, .w = 10, .h = 10 };
+    try t.replaceChildren(t.root, &.{ plain_0, mid, high, low, plain_1 });
+
+    var mp = try painter.MockPainter.init(std.testing.allocator, &theme.light);
+    defer mp.destroy();
+    t.paint(mp.ctx);
+
+    // 预期：plain_0、run 内 z 升序（bg_surface z0 → danger z1 → accent z2）、plain_1。
+    var colors: [5]theme.Color = undefined;
+    var ci: usize = 0;
+    for (mp.calls.items) |c| {
+        if (c == .fillRect and ci < 5) {
+            colors[ci] = c.fillRect.color;
+            ci += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 5), ci);
+    try std.testing.expect(colorEq(colors[0], theme.light.border));
+    try std.testing.expect(colorEq(colors[1], theme.light.bg_surface));
+    try std.testing.expect(colorEq(colors[2], theme.light.danger));
+    try std.testing.expect(colorEq(colors[3], theme.light.accent));
+    try std.testing.expect(colorEq(colors[4], theme.light.text_weak));
+}
+
 test "find by id" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1091,13 +1295,13 @@ test "paint culls children outside clip viewport (Scroll 剔除前提，§5.4)" 
     var t = try Tree.init(arena.allocator(), &theme.light);
     defer t.deinit();
 
-    // 绝对定位 + 手填 rect：10 个带背景的 box，各 100 高，y 从 0 到 900。
+    // 绝对定位 + 手填 hand_rect：10 个带背景的 box，各 100 高，y 从 0 到 900。
     // 背景由 paintNode 在 Node 层绘制（不依赖 dispatch），用 fillRect 次数观测剔除。
     t.root.layout = .{ .none = {} };
     for (0..10) |i| {
         const n = try t.createNode(t.root);
         n.style.bg = theme.light.accent;
-        n.rect = .{ .x = 0, .y = @as(f32, @floatFromInt(i * 100)), .w = 100, .h = 100 };
+        n.hand_rect = .{ .x = 0, .y = @as(f32, @floatFromInt(i * 100)), .w = 100, .h = 100 };
         try t.appendChild(t.root, n);
     }
     t.ensureLayout(.{ .width = 100, .height = 300 }); // 视口 100×300。
