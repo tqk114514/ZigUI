@@ -656,6 +656,18 @@ fn wndProc(hwnd: w32.HWND, u_msg: u32, w_param: w32.WPARAM, l_param: w32.LPARAM)
                 const sx: i16 = @truncate(raw);
                 const sy: i16 = @truncate(raw >> 16);
                 const scale = ctx.?.device.?.dpi_scale;
+                // 滚动条拇指（P0-3）：贴窗口右缘、与系统 resize 边（HTRIGHT）重叠——命中拇指
+                // 须交还客户区，否则拖拇指变成调整窗口大小。先于四边/四角判定。
+                {
+                    var pt = w32.foundation.POINT{ .x = sx, .y = sy };
+                    if (w32.user32.ScreenToClient(hwnd, &pt) != 0) {
+                        const dip = geometry.Point{
+                            .x = @as(f32, @floatFromInt(pt.x)) / scale,
+                            .y = @as(f32, @floatFromInt(pt.y)) / scale,
+                        };
+                        if (node.overThumb(ctx.?.tree, dip)) return w32.windows_and_messaging.HTCLIENT;
+                    }
+                }
                 // 非最大化：四边/四角 resize（用 per-DPI 系统边框厚）。
                 if (!isZoomed(hwnd)) {
                     const border = frameBorderPx(scale);

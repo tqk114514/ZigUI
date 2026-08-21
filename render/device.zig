@@ -478,6 +478,16 @@ pub const Device = struct {
         }
     }
 
+    /// node_id 层槽是否脏（无槽视为脏）：供 scroll 条带复用判定——嵌套静态层内容已 bake 进
+    /// 条带，层脏 = 条带陈旧，须整条带重栅。无槽返回 true（保守：新层未进过条带；池耗尽的
+    /// 退化层本就每帧重画，此处的逐帧 rebake 与之一致）。
+    pub fn isLayerDirty(self: *Device, node_id: usize) bool {
+        for (&self.layers) |*sf| {
+            if (sf.used and sf.node_id == node_id) return sf.dirty;
+        }
+        return true;
+    }
+
     /// 释放第 i 个层槽（DC + 位图 + brush），标记空闲。设备丢失重建/池驱逐共用。
     fn releaseLayer(self: *Device, i: usize) void {
         const sf = &self.layers[i];

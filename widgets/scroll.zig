@@ -71,7 +71,8 @@ pub fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
         },
         .pointer_down => |p| {
             const d = &n.widget.scroll;
-            const tr = d.thumbRect(n.rect.inset(n.style.padding)) orelse return false;
+            const view = n.rect.inset(n.style.padding);
+            const tr = d.thumbRect(view, n.style.padding.right) orelse return false;
             if (!tr.contains(p.pos)) return false;
             d.thumb_drag = true;
             d.thumb_grab_off = p.pos.y - tr.y; // 抓取点保持：拖动拇指不跳变。
@@ -100,7 +101,7 @@ pub fn onEvent(tree: *node.Tree, n: *node.Node, e: *const event.Event) bool {
 fn setOffsetFromThumbY(n: *node.Node, thumb_y: f32) void {
     const d = &n.widget.scroll;
     const view = n.rect.inset(n.style.padding);
-    const tr = d.thumbRect(view) orelse return;
+    const tr = d.thumbRect(view, n.style.padding.right) orelse return;
     const travel = view.h - tr.h;
     if (travel <= 0) return;
     const frac = std.math.clamp((thumb_y - view.y) / travel, 0, 1);
@@ -109,9 +110,11 @@ fn setOffsetFromThumbY(n: *node.Node, thumb_y: f32) void {
 
 /// 视口固定覆盖层（滚动条拇指，P0-3）：由 paintNode 在条带 blit / 内容之后调用
 ///（不随内容滚）；无溢出不绘制。视觉只取 token（L9）：idle bg_hover，悬停/拖拽 bg_pressed。
+/// 拇指贴视口右缘留小距离（thumb_margin）；内容避让道（laneWidth）与其独立（§6.2-3 三段几何）。
 pub fn paint(tree: *node.Tree, pc: painter.PaintCtx, n: *node.Node) void {
     const d = &n.widget.scroll;
-    const tr = d.thumbRect(n.rect.inset(n.style.padding)) orelse return;
+    const view = n.rect.inset(n.style.padding);
+    const tr = d.thumbRect(view, n.style.padding.right) orelse return;
     const th = tree.theme_ref;
     const active = d.thumb_drag or d.thumb_hover;
     pc.fillRoundedRect(tr, widget.Scroll.thumb_w * 0.5, if (active) th.bg_pressed else th.bg_hover);
@@ -267,17 +270,17 @@ test "scroll: thumb geometry proportional, clamped, hidden without overflow (P0-
     const d = &t.root.widget.scroll;
     const view = t.root.rect.inset(t.root.style.padding);
 
-    const tr0 = d.thumbRect(view).?;
+    const tr0 = d.thumbRect(view, 0).?;
     try std.testing.expect(geo.approxEq(100, tr0.h));
     try std.testing.expect(geo.approxEq(0, tr0.y)); // offset 0 → 拇指顶在视口顶。
     try std.testing.expect(geo.approxEq(view.x + view.w - widget.Scroll.thumb_w - 2, tr0.x));
     // 滚到底（max_off 200）→ y = 行程 100。
     setOffset(t.root, 200);
-    const tr1 = d.thumbRect(view).?;
+    const tr1 = d.thumbRect(view, 0).?;
     try std.testing.expect(geo.approxEq(100, tr1.y));
     // 中点 offset 100 → y = 50。
     setOffset(t.root, 100);
-    const tr2 = d.thumbRect(view).?;
+    const tr2 = d.thumbRect(view, 0).?;
     try std.testing.expect(geo.approxEq(50, tr2.y));
 
     // 无溢出（内容 == 视口）→ 无拇指。
@@ -287,12 +290,25 @@ test "scroll: thumb geometry proportional, clamped, hidden without overflow (P0-
     t2.root.widget = .{ .scroll = .{} };
     for (0..2) |_| _ = try addLeaf(&t2, t2.root, .{ .width = 100, .height = 100 });
     t2.ensureLayout(.{ .width = 100, .height = 200 });
-    try std.testing.expect(t2.root.widget.scroll.thumbRect(t2.root.rect.inset(t2.root.style.padding)) == null);
+    try std.testing.expect(t2.root.widget.scroll.thumbRect(t2.root.rect.inset(t2.root.style.padding), 0) == null);
 
     // 极小拇指下限：视口 200、内容 4000 → 高 = 200²/4000 = 10 → 钳到 min 24。
     d.content_h = 4000;
-    const tr3 = d.thumbRect(view).?;
+    const tr3 = d.thumbRect(view, 0).?;
     try std.testing.expect(geo.approxEq(24, tr3.h));
+}
+
+test "scroll: lane width and thumb x follow three-segment rhythm (P0-3 视觉节奏)" {
+    // 三段几何：`左缘 ←A→ 内容 ←A→ 拇指 ←小距离→ 右缘`。
+    // 道宽 = 拇指 8 + 右缘小距离 2（内容与拇指的间距由右 padding 承担，勿叠加）。
+    try std.testing.expect(geo.approxEq(10, widget.Scroll.laneWidth()));
+    // view (0,0,100,200)、pad_right 16（外盒右缘 = 116）→ 拇指 x = 116 − 2 − 8 = 106。
+    const d = widget.Scroll{ .content_h = 400, .offset_y = 0 };
+    const tr = d.thumbRect(.{ .x = 0, .y = 0, .w = 100, .h = 200 }, 16).?;
+    try std.testing.expect(geo.approxEq(106, tr.x));
+    // pad_right 0：x = 100 − 2 − 8 = 90。
+    const tr0 = d.thumbRect(.{ .x = 0, .y = 0, .w = 100, .h = 200 }, 0).?;
+    try std.testing.expect(geo.approxEq(90, tr0.x));
 }
 
 test "scroll: thumb drag maps pointer to offset with grab offset (P0-3)" {

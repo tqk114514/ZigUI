@@ -93,21 +93,32 @@ pub const Scroll = struct {
 
     /// 拇指宽度（DIP；pub 供 paint 取圆角半径）。
     pub const thumb_w: f32 = 8;
-    /// 拇指距视口右缘间隙（DIP）。
-    const thumb_gap: f32 = 2;
+    /// 拇指与视口右缘的小距离（DIP）：滚动条贴右缘但留一丝呼吸（区别于内容侧的 padding 节奏）。
+    const thumb_margin: f32 = 2;
     /// 拇指最小高（DIP）：内容极多时保持可抓取。
     const thumb_min_h: f32 = 24;
 
-    /// 拇指矩形（根空间 DIP，view = 视口即 n.rect.inset(padding)）：内容未超出视口返回 null。
-    /// 高 = 视口高² ÷ 内容高（下限 thumb_min_h、上限视口高）；y 随 offset 比例平移（行程 = 视口高 − 拇指高）。
-    pub fn thumbRect(self: Scroll, view: geo.Rect) ?geo.Rect {
+    /// 内容避让道宽度（DIP，pub 供 core arrange/measure 收缩内容区）。
+    /// 三段几何（P0-3 视觉节奏）：`左缘 ←A→ 内容 ←A→ 拇指 ←小距离→ 右缘`——内容与拇指的
+    /// 间距 = A（= 右 padding，内容区本已内缩 padding 承担）；道宽只补"拇指宽 + 右缘小距离"
+    ///（勿再叠加 padding：内容到拇指会变成 2×A）。
+    pub fn laneWidth() f32 {
+        return thumb_w + thumb_margin;
+    }
+
+    /// 拇指矩形（根空间 DIP；view = 视口即 n.rect.inset(padding)，pad_right = 自身右 padding）：
+    /// 内容未超出视口返回 null。高 = 视口高² ÷ 内容高（下限 thumb_min_h、上限视口高）；
+    /// y 随 offset 比例平移（行程 = 视口高 − 拇指高）；x 贴**节点外盒右缘**（n.rect 右缘 =
+    /// view 右缘 + pad_right，即窗口右缘）留 thumb_margin 小距离——view 已内缩 padding，
+    /// 直接贴 view 右缘会错位成"距窗口一个 padding + 缝隙"。
+    pub fn thumbRect(self: Scroll, view: geo.Rect, pad_right: f32) ?geo.Rect {
         if (self.content_h <= view.h + 0.001) return null;
         const max_off = self.content_h - view.h;
         const frac = std.math.clamp(self.offset_y / max_off, 0, 1);
         const h = @min(@max(view.h * view.h / self.content_h, thumb_min_h), view.h);
         const travel = @max(0, view.h - h);
         return .{
-            .x = view.x + view.w - thumb_w - thumb_gap,
+            .x = view.x + view.w + pad_right - thumb_margin - thumb_w,
             .y = view.y + travel * frac,
             .w = thumb_w,
             .h = h,

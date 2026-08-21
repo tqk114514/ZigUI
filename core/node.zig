@@ -247,11 +247,13 @@ pub const Tree = struct {
         paintNode(t, pc, t.root);
     }
 
-    /// 供离屏表面宿主调用：以自定义裁剪区绘制 node 的子节点（滚动条带栅格化，§5.6）。
-    /// 子节点 rect 与 clip 均为 node 的本地（父）坐标系；D2D 经 surface 变换折换到条带。
+    /// 供离屏表面宿主调用：以自定义裁剪区绘制 node 的子节点（scroll 条带 / 静态层内容栅格化，§5.6）。
+    /// 子节点 rect 与 clip 均为 node 的本地（父）坐标系；D2D 经 surface 变换折换到位图。
+    /// 经 drawChildren（与主路径同入口）：嵌套层节点按 layer_z 升序合成——离屏 bake 与
+    /// 主场景绘制共用同一画序，杜绝两路径排序翻转。
     pub fn paintChildrenInto(t: *Tree, pc: painter.PaintCtx, n: *Node, clip: geo.Rect) void {
         pc.pushClip(clip);
-        for (n.children) |c| paintNode(t, pc, c);
+        drawChildren(t, pc, n);
         pc.popClip();
     }
 
@@ -395,6 +397,14 @@ pub const Tree = struct {
                 var content_c = c.loosen();
                 content_c.max.width = @max(0, content_c.max.width - pad.left - pad.right);
                 content_c.max.height = @max(0, content_c.max.height - pad.top - pad.bottom);
+                // scroll 内容宽度同 arrange 避让拇指（P0-3）：溢出时子节点可用宽再收避让道
+                //（= 拇指宽 + 右缘小距离；内容与拇指间距由 padding 承担），与 arrange 一致
+                //（上轮 content_h 判定，resize 重测自愈）。
+                if (n.widget == .scroll and n.layout == .column) {
+                    if (n.widget.scroll.content_h > content_c.max.height + 0.001) {
+                        content_c.max.width = @max(0, content_c.max.width - widget.Scroll.laneWidth());
+                    }
+                }
 
                 const axis: layout.Axis = if (n.layout == .row) .horizontal else .vertical;
                 var main: f32 = 0;
@@ -434,7 +444,15 @@ pub const Tree = struct {
 
         if (n.children.len == 0) return;
         const pad = n.style.padding;
-        const inner = n.rect.inset(pad);
+        // scroll 内容区避让拇指（P0-3 可视滚动条）：有溢出时右缘让出避让道（= 拇指宽 + 右缘
+        // 小距离；内容与拇指的间距 = 右 padding，由内缩 padding 承担）。溢出判定用上轮
+        // content_h（本轮尾刷新，resize 触发重测自愈）。
+        var inner = n.rect.inset(pad);
+        if (n.widget == .scroll and n.layout == .column) {
+            if (n.widget.scroll.content_h > inner.h + 0.001) {
+                inner.w = @max(0, inner.w - widget.Scroll.laneWidth());
+            }
+        }
 
         // 主轴内容尺寸（不含 padding，内容坐标）。scroll 容器 arrange 后刷新 content_h。
         var content_extent: f32 = 0;
@@ -775,8 +793,26 @@ fn isLayerNode(n: *Node) bool {
 /// 命中测试找到的是内容子节点，此处按几何判定（几何在 core/widget.zig 的 Scroll.thumbRect）。
 fn thumbHit(n: *Node, pos: geo.Point) bool {
     const d = n.widget.scroll;
-    const tr = d.thumbRect(n.rect.inset(n.style.padding)) orelse return false;
+    const view = n.rect.inset(n.style.padding);
+    const tr = d.thumbRect(view, n.style.padding.right) orelse return false;
     return tr.contains(pos);
+}
+
+/// 指针（客户区 DIP）是否落在任一可见 scroll 的拇指上：供 platform 的 WM_NCHITTEST 排除
+/// 系统 resize 边（拇指贴窗口右缘、与 HTRIGHT 区重叠，须交还客户区，否则拖拇指变成调窗口）。
+/// 不可见子树整枝剪除；rect 不含点也剪枝（与 hitTest 同量级的每帧遍历）。
+pub fn overThumb(t: *Tree, pos: geo.Point) bool {
+    return overThumbNode(t.root, pos);
+}
+
+fn overThumbNode(n: *Node, pos: geo.Point) bool {
+    if (!n.flags.visible) return false;
+    if (!n.rect.contains(pos)) return false;
+    if (n.widget == .scroll and thumbHit(n, pos)) return true;
+    for (n.children) |c| {
+        if (overThumbNode(c, pos)) return true;
+    }
+    return false;
 }
 
 /// 失效 n 所在的最近层宿主的离屏缓存（文件级辅助，§5.6）。从 n 向上找最近层节点祖先，
@@ -1349,6 +1385,27 @@ test "scroll thumb: pointer down routes to scroll, drag move follows active (P0-
     try std.testing.expect(t.root.widget.scroll.thumb_hover);
     _ = t.dispatch(&.{ .pointer_move = .{ .pos = .{ .x = 50, .y = 10 } } });
     try std.testing.expect(!t.root.widget.scroll.thumb_hover);
+}
+
+test "overThumb: geometric thumb hit for NCHITTEST, invisible subtree skipped (P0-3)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = try Tree.init(arena.allocator(), &theme.light);
+    defer t.deinit();
+
+    // 视口 200、内容 400：拇指 (90, 0, 8, 100)（pad_right 0）。
+    t.root.layout = .{ .column = .{} };
+    t.root.widget = .{ .scroll = .{} };
+    for (0..4) |_| _ = try addFixedLeaf(&t, t.root, .{ .width = 100, .height = 100 });
+    t.ensureLayout(.{ .width = 100, .height = 200 });
+
+    try std.testing.expect(overThumb(&t, .{ .x = 94, .y = 50 })); // 拇指内。
+    try std.testing.expect(!overThumb(&t, .{ .x = 50, .y = 50 })); // 内容区。
+    try std.testing.expect(!overThumb(&t, .{ .x = 94, .y = 150 })); // 视口外（rect 剪枝）。
+
+    // 无溢出 → 无拇指。
+    t.root.widget.scroll.content_h = 200;
+    try std.testing.expect(!overThumb(&t, .{ .x = 94, .y = 50 }));
 }
 
 test "find by id" {

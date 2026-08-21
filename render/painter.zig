@@ -311,9 +311,12 @@ fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     const px_w: u32 = @intFromFloat(std.math.ceil(view_w * dev.dpi_scale));
     const px_h: u32 = @intFromFloat(std.math.ceil(view_h * dev.dpi_scale));
     const sf = dev.acquireLayer(node_id, @max(1, px_w), @max(1, px_h)) orelse return false;
+    // 合成目标 = 当前正在绘制的 DC（painterTarget）：顶层 → 主 rt；嵌在 scroll 条带栅格化内 →
+    // 条带 DC（层 bake 进条带，随条带平移、受视口 src 裁剪——不得直画主场景绕过视口裁剪）。
+    const target = painterTarget(pc);
     // 复用：内容未变 → 直接合成（含 alpha / 缩放 / 圆角）。
     if (!sf.dirty) {
-        if (sf.bitmap != null) blitSurface(dev, sf, dest, src, n.layer_alpha, radius);
+        if (sf.bitmap != null) blitSurface(dev, sf, target, dest, src, n.layer_alpha, radius);
         return true;
     }
     // 栅化：把该子树画到离屏位图（本地坐标对齐位图原点，对齐物理像素）。
@@ -354,60 +357,31 @@ fn implStaticLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     sf.view_h = view_h;
     sf.anchor_off = 0;
     sf.dirty = false;
-    blitSurface(dev, sf, dest, src, n.layer_alpha, radius);
+    blitSurface(dev, sf, target, dest, src, n.layer_alpha, radius);
     return true;
 }
 
-/// scroll 层复用路径下，把子树内嵌套的显式静态层合成进主场景（§5.6）。
-/// 静态层是独立缓存表面，内容不进 scroll 条带；而 scroll 复用直接平移条带、跳过子遍历，
-/// 若不在此补画，这些层只在 scroll 重栅化那帧随 paintChildrenInto 顺带出现，停下即消失。
-/// 同一父下的静态层兄弟必须与 bake 路径（drawChildren，L8/C §5.4）一致按 layer_z **升序**
-/// 合成（z 大者盖在之上，相等保持声明序）——否则复用路径走树序、重栅化走 z 序，
-/// 两个路径画序翻转 → 鼠标移动经过父重栅化时静态层颜色/覆盖闪烁。
-fn compositeNestedStaticLayers(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: painter.PaintCtx) void {
-    // 容器的静态层兄弟 ≥2 时按 z 升序（与 drawChildren 的 bubble 规则一致：静态层相邻交换、
-    // 非层为 run 边界不跨界、同 z 稳定）；否则按树序。
-    var layer_cnt: usize = 0;
-    for (n.children) |c| {
-        if (c.layer and c.widget != .scroll) layer_cnt += 1;
-    }
-    if (layer_cnt < 2) {
-        for (n.children) |c| compositePaintChild(dev, t, c, pc);
-        return;
-    }
-    const MAX = 64;
-    var order: [MAX]*node.Node = undefined;
-    const cnt = @min(n.children.len, MAX);
-    for (n.children[0..cnt], 0..) |c, i| order[i] = c;
-    var i: usize = 0;
-    while (i < cnt) : (i += 1) {
-        if (!(order[i].layer and order[i].widget != .scroll)) continue;
-        var j = i;
-        while (j > 0) {
-            const prev = order[j - 1];
-            const cur = order[j];
-            if (!(prev.layer and prev.widget != .scroll)) break; // run 边界。
-            if (!(prev.layer_z > cur.layer_z)) break; // 相邻已有序（含同 z 稳定）。
-            order[j - 1] = cur;
-            order[j] = prev;
-            j -= 1;
-        }
-    }
-    for (order[0..cnt]) |c| compositePaintChild(dev, t, c, pc);
-    var k = cnt;
-    while (k < n.children.len) : (k += 1) compositePaintChild(dev, t, n.children[k], pc);
+/// 当前 PaintCtx 绑定的绘制目标 DC：pc.impl 即本模块 D2DPainter，其 sf 决定目标
+/// （主 rt 或某离屏层/条带槽 DC）。层/条带 blit 必须落进"当前正在绘制的目标"——
+/// 静态层嵌在 scroll 条带栅格化内时 blit 进条带位图（随条带平移、受视口裁剪），
+/// 而非直画主场景（旧实现绕过视口裁剪，层溢出绘制到 padding 区直至窗口边框）。
+fn painterTarget(pc: painter.PaintCtx) *d2d.ID2D1DeviceContext {
+    const p: *D2DPainter = @ptrCast(@alignCast(pc.impl));
+    return @fieldParentPtr("ID2D1RenderTarget", p.rt());
 }
 
-/// compositeNestedStaticLayers 的单个子处理步进：可见且与主场景当前裁剪相交才绘制；
-/// 显式静态层调宿主绘制（自含背景/边框/子内容，不继续下钻）；其余非 scroll 容器下钻寻层。
-fn compositePaintChild(dev: *device_mod.Device, t: *node.Tree, c: *node.Node, pc: painter.PaintCtx) void {
-    if (!c.flags.visible) return;
-    if (!pc.clipIntersects(c.rect)) return;
-    if (c.layer and c.widget != .scroll) {
-        _ = t.layer_host.?.vtable.paintLayer(t.layer_host.?.impl, t, c, pc);
-    } else if (c.widget != .scroll) {
-        compositeNestedStaticLayers(dev, t, c, pc);
+/// scroll 条带复用前置检查：子树内的显式静态层是否有脏槽/无槽（从未栅格）。
+/// 层内容已 bake 进条带（blitSurface 定向当前绘制目标），层脏 = 条带内容陈旧 → 须整条带重栅。
+/// 嵌套 scroll 跳过（自管其条带，其脏由自身复用判定处理）。
+fn nestedLayerStale(dev: *device_mod.Device, n: *node.Node) bool {
+    for (n.children) |c| {
+        if (c.layer and c.widget != .scroll) {
+            if (dev.isLayerDirty(@intFromPtr(c))) return true;
+        } else if (c.widget != .scroll) {
+            if (nestedLayerStale(dev, c)) return true;
+        }
     }
+    return false;
 }
 
 /// 滚动层离屏绘制（scroll widget，§5.6 光栅缓存）：未命中条带则整条带重栅化到离屏位图，
@@ -426,19 +400,20 @@ fn implScrollLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
 
     const strip_half = strip_h * 0.5;
     // 合成 dest = scroll 视口（父坐标系，§5.3：布局子树已父坐标；v1 scroll 为 root/布局内均父坐标）。
+    // 条带 blit 定向"当前绘制目标"（painterTarget）：顶层 scroll → 主 rt；嵌套在外层离屏
+    // bake 中 → 外层条带/层槽 DC（本条带成为外层位图的一部分）。
     const view_win = view;
-    // 复用判定（§5.6）：内容未脏、仍属该 scroll、视口/条带尺寸未变、平移仍在条带内 → 直接平移位图。
+    const target = painterTarget(pc);
+    // 复用判定（§5.6）：内容未脏、嵌套静态层无脏槽（层已 bake 进条带，层脏 = 条带陈旧）、
+    // 视口/条带尺寸未变、平移仍在条带内 → 直接平移位图。
     const reuse_src_y = (strip_half - view_h * 0.5) + (off - sf.anchor_off);
-    if (!sf.dirty and geometry.approxEq(sf.view_w, view_w) and geometry.approxEq(sf.view_h, view_h) and
+    if (!sf.dirty and !nestedLayerStale(dev, n) and geometry.approxEq(sf.view_w, view_w) and
+        geometry.approxEq(sf.view_h, view_h) and
         reuse_src_y >= 0 and reuse_src_y + view_h <= strip_h + 0.01)
     {
         if (sf.bitmap != null) {
-            blitSurface(dev, sf, view_win, .{ .x = 0, .y = reuse_src_y, .w = view_w, .h = view_h }, n.layer_alpha, 0);
+            blitSurface(dev, sf, target, view_win, .{ .x = 0, .y = reuse_src_y, .w = view_w, .h = view_h }, n.layer_alpha, 0);
         }
-        // 复用路径跳过了子遍历（§5.6 条带平移），但子树里嵌套的显式静态层是**独立缓存表面**、
-        // 不被 bake 进条带；若复用时不把它们合成进主场景，它们只在父重栅化那帧随 paintChildrenInto
-        // 顺带出现，鼠标停下（scroll 进复用）就消失。故复用也要下钻子树、对每个静态层调宿主绘制。
-        compositeNestedStaticLayers(dev, t, n, pc);
         return true;
     }
 
@@ -483,21 +458,24 @@ fn implScrollLayer(dev: *device_mod.Device, t: *node.Tree, n: *node.Node, pc: pa
     sf.dirty = false;
     // 视口此时居条带中央：源 y = strip_half - view_h/2。
     const rebaked_src_y = (strip_half - view_h * 0.5) + (off - sf.anchor_off);
-    blitSurface(dev, sf, view_win, .{ .x = 0, .y = rebaked_src_y, .w = view_w, .h = view_h }, n.layer_alpha, 0);
+    blitSurface(dev, sf, target, view_win, .{ .x = 0, .y = rebaked_src_y, .w = view_w, .h = view_h }, n.layer_alpha, 0);
     return true;
 }
 
-/// 离屏层位图 → 主场景合成绘制（§5.6 / C 层合成增强：alpha / 缩放 / 圆角）：dest 为主场景
-/// 矩形（DIP，可为层视口 × layer_scale），src 为层/条带内源矩形（DIP），opacity 为层合成透明度
-/// （layer_alpha），radius 为合成圆角（>0 时用 PushLayer + 圆角 geometry 遮罩裁剪四角；≤0 直绘）。
+/// 离屏层位图 → 当前绘制目标合成（§5.6 / C 层合成增强：alpha / 缩放 / 圆角）：dest 为目标
+/// 坐标矩形（DIP，可为层视口 × layer_scale），src 为层/条带内源矩形（DIP），opacity 为层合成
+/// 透明度（layer_alpha），radius 为合成圆角（>0 时用 PushLayer + 圆角 geometry 遮罩裁剪四角；≤0 直绘）。
+/// **target = 当前正在绘制的 DC**（主 rt，或外层离屏条带/层槽 DC）：静态层嵌在 scroll 条带
+/// 栅格化内时 target 是条带 DC——层内容 bake 进条带位图，随条带平移、受视口 src 裁剪；
+/// 直画主 rt 的旧实现绕过视口裁剪，层溢出绘制到 padding 区直至窗口边框。
 /// 平移/缩放不改内容源分辨率——**只把位置对齐物理像素（§5.1 snap），w/h 尺寸原样保留**——若连
 /// w/h 一起取整会把内容拖到偶/奇整数尺寸（顶行拉伸/+1px 缝隙，滚动"没对齐"）。
-fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geometry.Rect, src: geometry.Rect, opacity: f32, radius: f32) void {
-    const rt = dev.rt orelse return;
+fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, target: ?*d2d.ID2D1DeviceContext, dest: geometry.Rect, src: geometry.Rect, opacity: f32, radius: f32) void {
+    const dc = target orelse return;
     const bmp = sf.bitmap orelse return;
-    // 主场景 DC 内嵌 ID2D1RenderTarget 基类：圆角的 PushLayer/PopLayer 由该基类接口提供
+    // 目标 DC 内嵌 ID2D1RenderTarget 基类：圆角的 PushLayer/PopLayer 由该基类接口提供
     //（DC 自身只有 PushLayer(1)，无 PopLayer，§5.6）。
-    const rtc = &dev.rt.?.ID2D1RenderTarget;
+    const rtc = &dc.ID2D1RenderTarget;
     const scale = dev.dpi_scale;
     const w = dest.w;
     const h = dest.h;
@@ -517,7 +495,7 @@ fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
         // 圆角合成（C）：PushLayer + ID2D1RoundedRectangleGeometry 几何遮罩，裁剪合成层四角。
         // geometry 原点无关（(0,0,w,h)，DIP），位置经 maskTransform 平移到 dest——平移不入缓存键，
         // 层随滚动/布局移动时零重建（L4）；dest 已对齐像素网格（上方 snap），圆角边缘保持锐利。
-        if (roundedMask(dev, sf, d, radius)) |m| {
+        if (roundedMask(dev, sf, rtc, d, radius)) |m| {
             const params = d2d.D2D1_LAYER_PARAMETERS{
                 .contentBounds = m.bounds,
                 .geometricMask = &m.geom.ID2D1Geometry,
@@ -528,13 +506,13 @@ fn blitSurface(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geo
                 .layerOptions = .{},
             };
             rtc.PushLayer(&params, m.layer);
-            rt.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), opacity, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
+            dc.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), opacity, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
             rtc.PopLayer();
             return;
         }
         // geometry/layer 创建失败（工厂/OOM）退化为直绘（行为正确，仅四角不圆）。
     }
-    rt.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), opacity, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
+    dc.DrawBitmap(&bmp.ID2D1Bitmap, &toD2DRect(d), opacity, d2d.D2D1_INTERPOLATION_MODE.LINEAR, &toD2DRect(s), null);
 }
 
 /// 圆角遮罩（C）：取（或按需缓存重建）PushLayer 用的 layer 对象与圆角 geometry。
@@ -550,10 +528,10 @@ const RoundMask = struct {
     transform: d2d.common.D2D_MATRIX_3X2_F,
 };
 
-fn roundedMask(dev: *device_mod.Device, sf: *device_mod.RenderSurface, dest: geometry.Rect, radius_dip: f32) ?RoundMask {
+fn roundedMask(dev: *device_mod.Device, sf: *device_mod.RenderSurface, rtc: *d2d.ID2D1RenderTarget, dest: geometry.Rect, radius_dip: f32) ?RoundMask {
     if (sf.mask_layer == null) {
-        // layer 对象由 ID2D1RenderTarget 接口创建（DeviceContext 内嵌该基类成员，§5.6）。
-        const rtc = &dev.rt.?.ID2D1RenderTarget;
+        // layer 对象由目标 DC 的 ID2D1RenderTarget 基类接口创建（各 DC 同属一个 D2D 设备，
+        // 设备级资源可跨 DC 复用；创建失败退化为直绘）。
         var lo: *d2d.ID2D1Layer = undefined;
         if (rtc.CreateLayer(null, &lo).failed) return null;
         sf.mask_layer = lo;
